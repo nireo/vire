@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -21,6 +23,8 @@ type Model struct {
 type Server struct {
 	httpServer *http.Server
 	models     []Model
+	proxies    map[string]*httputil.ReverseProxy
+	transport  *http.Transport
 }
 
 func NewServer(addr, registryPath string) (*Server, error) {
@@ -29,17 +33,34 @@ func NewServer(addr, registryPath string) (*Server, error) {
 		return nil, fmt.Errorf("load model registry: %w", err)
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", healthHandler)
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = 2 * time.Minute
+	// Pass compressed responses through rather than decompressing them here.
+	transport.DisableCompression = true
 
+	mux := http.NewServeMux()
 	server := &Server{
 		httpServer: &http.Server{
-			Addr:    addr,
-			Handler: mux,
+			Addr:              addr,
+			Handler:           mux,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			IdleTimeout:       60 * time.Second,
+			// No WriteTimeout: generation streams can legitimately be long-lived.
 		},
-		models: models,
+		models:    models,
+		proxies:   make(map[string]*httputil.ReverseProxy, len(models)),
+		transport: transport,
 	}
+	for _, model := range models {
+		// loadModels has already validated the URL.
+		target, _ := url.Parse(model.URL)
+		server.proxies[model.Name] = newProxy(target, transport)
+	}
+
+	mux.HandleFunc("GET /health", healthHandler)
 	mux.HandleFunc("GET /models", server.modelsHandler)
+	mux.HandleFunc("POST /v1/chat/completions", server.handleCompletions)
 
 	return server, nil
 }
@@ -58,12 +79,21 @@ func loadModels(path string) ([]Model, error) {
 		return nil, errors.New("registry must be a JSON array")
 	}
 
+	names := make(map[string]bool, len(models))
 	for i, model := range models {
 		if strings.TrimSpace(model.Name) == "" {
 			return nil, fmt.Errorf("model %d: name is required", i)
 		}
-		if strings.TrimSpace(model.URL) == "" {
-			return nil, fmt.Errorf("model %d: url is required", i)
+		if names[model.Name] {
+			return nil, fmt.Errorf("model %d: duplicate name %q", i, model.Name)
+		}
+		names[model.Name] = true
+		target, err := url.Parse(model.URL)
+		if err != nil || (target.Scheme != "http" && target.Scheme != "https") || target.Hostname() == "" {
+			return nil, fmt.Errorf("model %d: url must be an absolute HTTP(S) URL", i)
+		}
+		if target.User != nil || (target.Path != "" && target.Path != "/") || target.RawQuery != "" || target.ForceQuery || target.Fragment != "" || strings.Contains(model.URL, "#") {
+			return nil, fmt.Errorf("model %d: url must contain only an origin, without credentials, query, or fragment", i)
 		}
 	}
 
@@ -71,6 +101,8 @@ func loadModels(path string) ([]Model, error) {
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	defer s.transport.CloseIdleConnections()
+
 	errs := make(chan error, 1)
 	go func() {
 		errs <- s.httpServer.ListenAndServe()

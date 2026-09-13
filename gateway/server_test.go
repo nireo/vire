@@ -55,11 +55,47 @@ func TestNewServerLoadsModels(t *testing.T) {
 	}
 }
 
-func TestNewServerRejectsInvalidModel(t *testing.T) {
-	path := writeRegistry(t, `[{"name":"test"}]`)
+func TestNewServerRejectsInvalidRegistry(t *testing.T) {
+	for _, contents := range []string{
+		`null`, `{}`, `{`,
+		`[{"name":"test"}]`,
+		`[{"name":" ","url":"http://localhost:8000"}]`,
+		`[{"name":"test","url":"localhost:8000"}]`,
+		`[{"name":"test","url":"ftp://localhost:8000"}]`,
+		`[{"name":"test","url":"http://"}]`,
+		`[{"name":"test","url":"http://localhost:abc"}]`,
+		`[{"name":"test","url":"http://user:secret@localhost:8000"}]`,
+		`[{"name":"test","url":"http://localhost:8000/v1"}]`,
+		`[{"name":"test","url":"http://localhost:8000?key=value"}]`,
+		`[{"name":"test","url":"http://localhost:8000?"}]`,
+		`[{"name":"test","url":"http://localhost:8000#fragment"}]`,
+		`[{"name":"test","url":"http://localhost:8000"},{"name":"test","url":"http://localhost:8001"}]`,
+	} {
+		t.Run(contents, func(t *testing.T) {
+			if _, err := NewServer(":8080", writeRegistry(t, contents)); err == nil {
+				t.Fatal("expected invalid registry to fail")
+			}
+		})
+	}
+}
 
-	if _, err := NewServer(":8080", path); err == nil {
-		t.Fatal("expected invalid model registry to fail")
+func TestNewServerAcceptsOrigins(t *testing.T) {
+	for _, backend := range []string{"http://localhost:8000", "https://example.com/", "http://[::1]:8000"} {
+		t.Run(backend, func(t *testing.T) {
+			data, err := json.Marshal([]Model{{Name: "test", URL: backend}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := NewServer(":0", writeRegistry(t, string(data))); err != nil {
+				t.Fatalf("valid origin rejected: %v", err)
+			}
+		})
+	}
+}
+
+func TestNewServerAcceptsEmptyRegistry(t *testing.T) {
+	if _, err := NewServer(":0", writeRegistry(t, `[]`)); err != nil {
+		t.Fatal(err)
 	}
 }
 
