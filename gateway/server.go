@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"os"
 	"strings"
@@ -23,7 +22,7 @@ type Model struct {
 type Server struct {
 	httpServer *http.Server
 	models     []Model
-	proxies    map[string]*httputil.ReverseProxy
+	proxies    map[string]*modelRoute
 	transport  *http.Transport
 }
 
@@ -49,13 +48,25 @@ func NewServer(addr, registryPath string) (*Server, error) {
 			// No WriteTimeout: generation streams can legitimately be long-lived.
 		},
 		models:    models,
-		proxies:   make(map[string]*httputil.ReverseProxy, len(models)),
+		proxies:   make(map[string]*modelRoute, len(models)),
 		transport: transport,
 	}
 	for _, model := range models {
 		// loadModels has already validated the URL.
 		target, _ := url.Parse(model.URL)
-		server.proxies[model.Name] = newProxy(target, transport)
+		route := server.proxies[model.Name]
+		if route == nil {
+			route = &modelRoute{}
+			server.proxies[model.Name] = route
+		}
+		origin := strings.TrimSuffix(target.String(), "/")
+		route.backends = append(route.backends, &routeBackend{
+			proxy:  newProxy(target, transport),
+			origin: origin,
+		})
+	}
+	for _, route := range server.proxies {
+		route.buildRing()
 	}
 
 	mux.HandleFunc("GET /health", healthHandler)
@@ -79,15 +90,11 @@ func loadModels(path string) ([]Model, error) {
 		return nil, errors.New("registry must be a JSON array")
 	}
 
-	names := make(map[string]bool, len(models))
+	destinations := make(map[Model]bool, len(models))
 	for i, model := range models {
 		if strings.TrimSpace(model.Name) == "" {
 			return nil, fmt.Errorf("model %d: name is required", i)
 		}
-		if names[model.Name] {
-			return nil, fmt.Errorf("model %d: duplicate name %q", i, model.Name)
-		}
-		names[model.Name] = true
 		target, err := url.Parse(model.URL)
 		if err != nil || (target.Scheme != "http" && target.Scheme != "https") || target.Hostname() == "" {
 			return nil, fmt.Errorf("model %d: url must be an absolute HTTP(S) URL", i)
@@ -95,6 +102,12 @@ func loadModels(path string) ([]Model, error) {
 		if target.User != nil || (target.Path != "" && target.Path != "/") || target.RawQuery != "" || target.ForceQuery || target.Fragment != "" || strings.Contains(model.URL, "#") {
 			return nil, fmt.Errorf("model %d: url must contain only an origin, without credentials, query, or fragment", i)
 		}
+		// Treat an origin with a trailing slash as the same destination.
+		key := Model{Name: model.Name, URL: strings.TrimSuffix(target.String(), "/")}
+		if destinations[key] {
+			return nil, fmt.Errorf("model %d: duplicate destination for %q", i, model.Name)
+		}
+		destinations[key] = true
 	}
 
 	return models, nil

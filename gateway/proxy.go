@@ -10,14 +10,71 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"sync/atomic"
+
+	"github.com/buraksezer/consistent"
+	"github.com/cespare/xxhash/v2"
 )
 
 const maxRequestBytes = 1 << 20 // 1 MiB; only requests are buffered, never responses.
+
+type routeBackend struct {
+	proxy  *httputil.ReverseProxy
+	origin string
+}
+
+func (backend *routeBackend) String() string { return backend.origin }
+
+type routeHasher struct{}
+
+func (routeHasher) Sum64(key []byte) uint64 { return xxhash.Sum64(key) }
+
+// modelRoute is immutable after startup except for its atomic request counter.
+// Each request stays on its selected backend for the entire response stream.
+type modelRoute struct {
+	backends []*routeBackend
+	ring     *consistent.Consistent
+	next     atomic.Uint64
+}
+
+func (route *modelRoute) buildRing() {
+	if len(route.backends) < 2 {
+		return
+	}
+	members := make([]consistent.Member, len(route.backends))
+	for i, backend := range route.backends {
+		members[i] = backend
+	}
+	// Keep these fixed across restarts and gateways to preserve affinity.
+	route.ring = consistent.New(members, consistent.Config{
+		PartitionCount:    4093,
+		ReplicationFactor: 20,
+		Load:              1.25,
+		Hasher:            routeHasher{},
+	})
+}
+
+func (route *modelRoute) selectBackend(conversationID string) *routeBackend {
+	if len(route.backends) == 1 {
+		return route.backends[0]
+	}
+	if conversationID != "" {
+		return route.ring.LocateKey([]byte(conversationID)).(*routeBackend)
+	}
+	index := (route.next.Add(1) - 1) % uint64(len(route.backends))
+	return route.backends[index]
+}
+
+func (route *modelRoute) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	backend := route.selectBackend(r.Header.Get("X-Conversation-ID"))
+	backend.proxy.ServeHTTP(w, r)
+}
 
 func newProxy(target *url.URL, transport http.RoundTripper) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(target)
+			r.Out.Header.Del("X-Conversation-ID") // Gateway-only routing metadata.
 			// Do not trust or forward client-supplied Forwarded/X-Forwarded headers.
 		},
 		Transport: transport,

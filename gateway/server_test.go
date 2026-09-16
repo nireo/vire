@@ -69,7 +69,8 @@ func TestNewServerRejectsInvalidRegistry(t *testing.T) {
 		`[{"name":"test","url":"http://localhost:8000?key=value"}]`,
 		`[{"name":"test","url":"http://localhost:8000?"}]`,
 		`[{"name":"test","url":"http://localhost:8000#fragment"}]`,
-		`[{"name":"test","url":"http://localhost:8000"},{"name":"test","url":"http://localhost:8001"}]`,
+		`[{"name":"test","url":"http://localhost:8000"},{"name":"test","url":"http://localhost:8000"}]`,
+		`[{"name":"test","url":"http://localhost:8000"},{"name":"test","url":"http://localhost:8000/"}]`,
 	} {
 		t.Run(contents, func(t *testing.T) {
 			if _, err := NewServer(":8080", writeRegistry(t, contents)); err == nil {
