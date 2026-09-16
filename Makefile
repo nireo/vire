@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check test test-race lint check build run dev smoke
+.PHONY: fmt fmt-check test test-race lint check build run dev smoke test-vllm test-vllm-runner
 
 fmt:
 	go fmt ./...
@@ -28,3 +28,11 @@ dev:
 
 smoke:
 	@bash scripts/smoke.sh
+
+# Opt-in: starts real inference and may download model weights.
+test-vllm:
+	python3 scripts/integration_vllm.py $(VLLM_TEST_ARGS)
+
+# Test the integration runner itself without downloading or loading a model.
+test-vllm-runner:
+	python3 -B -m unittest discover -s scripts -p 'test_integration_vllm.py'
