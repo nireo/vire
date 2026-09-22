@@ -32,9 +32,11 @@ func (routeHasher) Sum64(key []byte) uint64 { return xxhash.Sum64(key) }
 // modelRoute is immutable after startup except for its atomic request counter.
 // Each request stays on its selected backend for the entire response stream.
 type modelRoute struct {
-	backends []*routeBackend
-	ring     *consistent.Consistent
-	next     atomic.Uint64
+	backends      []*routeBackend
+	ring          *consistent.Consistent
+	next          atomic.Uint64
+	model         string
+	observability *observability
 }
 
 func (route *modelRoute) buildRing() {
@@ -66,7 +68,21 @@ func (route *modelRoute) selectBackend(conversationID string) *routeBackend {
 }
 
 func (route *modelRoute) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	backend := route.selectBackend(r.Header.Get("X-Conversation-ID"))
+	conversationID := r.Header.Get("X-Conversation-ID")
+	backend := route.selectBackend(conversationID)
+	if state := observation(r); state != nil {
+		state.model, state.backend = route.model, backend.origin
+		state.routing = "round_robin"
+		if len(route.backends) == 1 {
+			state.routing = "single"
+		} else if conversationID != "" {
+			state.routing = "affinity"
+		}
+		route.observability.routed.WithLabelValues(state.model, state.backend, state.routing).Inc()
+		inflight := route.observability.inflight.WithLabelValues(state.model, state.backend)
+		inflight.Inc()
+		defer inflight.Dec()
+	}
 	backend.proxy.ServeHTTP(w, r)
 }
 
@@ -75,9 +91,13 @@ func newProxy(target *url.URL, transport http.RoundTripper) *httputil.ReversePro
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(target)
 			r.Out.Header.Del("X-Conversation-ID") // Gateway-only routing metadata.
+			if state := observation(r.Out); state != nil {
+				r.Out.Header.Set("X-Request-ID", state.id)
+			}
 			// Do not trust or forward client-supplied Forwarded/X-Forwarded headers.
 		},
 		Transport: transport,
+		ErrorLog:  discardedProxyLog,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			if r.Context().Err() != nil {
 				return
@@ -88,6 +108,12 @@ func newProxy(target *url.URL, transport http.RoundTripper) *httputil.ReversePro
 			if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
 				status = http.StatusGatewayTimeout
 				message = "inference backend timed out"
+			}
+			if state := observation(r); state != nil {
+				state.outcome = "upstream_unavailable"
+				if status == http.StatusGatewayTimeout {
+					state.outcome = "upstream_timeout"
+				}
 			}
 			writeAPIError(w, status, message)
 		},

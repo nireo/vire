@@ -5,15 +5,16 @@ cd "$(dirname "$0")/.."
 
 GATEWAY_PORT=${GATEWAY_PORT:-8080}
 BACKEND_PORT=${BACKEND_PORT:-8000}
+METRICS_PORT=${METRICS_PORT:-9091}
 READINESS_TIMEOUT=${READINESS_TIMEOUT:-30}
-for port in "$GATEWAY_PORT" "$BACKEND_PORT"; do
+for port in "$GATEWAY_PORT" "$BACKEND_PORT" "$METRICS_PORT"; do
     if [[ ! "$port" =~ ^[1-9][0-9]{0,4}$ ]] || (( port > 65535 )); then
         echo "Ports must be integers between 1 and 65535" >&2
         exit 1
     fi
 done
-if [[ "$GATEWAY_PORT" == "$BACKEND_PORT" ]]; then
-    echo "Gateway and backend must use different ports" >&2
+if [[ "$GATEWAY_PORT" == "$BACKEND_PORT" || "$GATEWAY_PORT" == "$METRICS_PORT" || "$BACKEND_PORT" == "$METRICS_PORT" ]]; then
+    echo "Gateway, backend, and metrics must use different ports" >&2
     exit 1
 fi
 if [[ ! "$READINESS_TIMEOUT" =~ ^[1-9][0-9]{0,3}$ ]]; then
@@ -91,11 +92,13 @@ printf '[{"name":"example","url":"http://127.0.0.1:%s"}]\n' "$BACKEND_PORT" > "$
 backend_pid=$!
 wait_ready "http://127.0.0.1:$BACKEND_PORT/health"
 
-"$tmp/gateway" -addr "127.0.0.1:$GATEWAY_PORT" -registry "$tmp/models.json" &
+"$tmp/gateway" -addr "127.0.0.1:$GATEWAY_PORT" -registry "$tmp/models.json" \
+    -metrics-addr "127.0.0.1:$METRICS_PORT" &
 gateway_pid=$!
 wait_ready "http://127.0.0.1:$GATEWAY_PORT/health"
 
 echo "Ready: gateway http://127.0.0.1:$GATEWAY_PORT → fake vLLM http://127.0.0.1:$BACKEND_PORT"
+echo "Metrics: http://127.0.0.1:$METRICS_PORT/metrics"
 echo "Run 'make smoke' in another terminal. Ctrl-C stops both processes."
 while true; do
     check_children

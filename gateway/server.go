@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,13 +22,19 @@ type Model struct {
 }
 
 type Server struct {
-	httpServer *http.Server
-	models     []Model
-	proxies    map[string]*modelRoute
-	transport  *http.Transport
+	httpServer    *http.Server
+	models        []Model
+	proxies       map[string]*modelRoute
+	transport     *http.Transport
+	metricsServer *http.Server
+	observability *observability
 }
 
 func NewServer(addr, registryPath string) (*Server, error) {
+	return NewServerWithOptions(addr, registryPath, Options{})
+}
+
+func NewServerWithOptions(addr, registryPath string, options Options) (*Server, error) {
 	models, err := loadModels(registryPath)
 	if err != nil {
 		return nil, fmt.Errorf("load model registry: %w", err)
@@ -37,33 +45,54 @@ func NewServer(addr, registryPath string) (*Server, error) {
 	// Pass compressed responses through rather than decompressing them here.
 	transport.DisableCompression = true
 
+	logger := options.Logger
+	if logger == nil {
+		logger = slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	}
+	telemetry := newObservability(logger)
 	mux := http.NewServeMux()
 	server := &Server{
 		httpServer: &http.Server{
 			Addr:              addr,
-			Handler:           mux,
+			Handler:           telemetry.wrap(mux),
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       30 * time.Second,
 			IdleTimeout:       60 * time.Second,
 			// No WriteTimeout: generation streams can legitimately be long-lived.
 		},
-		models:    models,
-		proxies:   make(map[string]*modelRoute, len(models)),
-		transport: transport,
+		models:        models,
+		proxies:       make(map[string]*modelRoute, len(models)),
+		transport:     transport,
+		observability: telemetry,
+	}
+	if options.MetricsAddr != "" {
+		server.metricsServer = &http.Server{
+			Addr:              options.MetricsAddr,
+			Handler:           server.MetricsHandler(),
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      10 * time.Second,
+			IdleTimeout:       30 * time.Second,
+		}
 	}
 	for _, model := range models {
 		// loadModels has already validated the URL.
 		target, _ := url.Parse(model.URL)
 		route := server.proxies[model.Name]
 		if route == nil {
-			route = &modelRoute{}
+			route = &modelRoute{model: model.Name, observability: telemetry}
 			server.proxies[model.Name] = route
 		}
 		origin := strings.TrimSuffix(target.String(), "/")
 		route.backends = append(route.backends, &routeBackend{
-			proxy:  newProxy(target, transport),
+			proxy:  newProxy(target, observedTransport{base: transport, o: telemetry}),
 			origin: origin,
 		})
+		telemetry.inflight.WithLabelValues(model.Name, origin).Set(0)
+		telemetry.headers.WithLabelValues(model.Name, origin)
+		for _, mode := range []string{"single", "affinity", "round_robin"} {
+			telemetry.routed.WithLabelValues(model.Name, origin, mode)
+		}
 	}
 	for _, route := range server.proxies {
 		route.buildRing()
@@ -115,33 +144,74 @@ func loadModels(path string) ([]Model, error) {
 
 func (s *Server) Run(ctx context.Context) error {
 	defer s.transport.CloseIdleConnections()
+	if ctx.Err() != nil {
+		return nil
+	}
+	// Bind both sockets before serving either endpoint. A configuration error
+	// must not leave a partially running gateway behind.
+	api, err := net.Listen("tcp", s.httpServer.Addr)
+	if err != nil {
+		return fmt.Errorf("listen API: %w", err)
+	}
+	defer api.Close()
+	var metrics net.Listener
+	if s.metricsServer != nil {
+		metrics, err = net.Listen("tcp", s.metricsServer.Addr)
+		if err != nil {
+			return fmt.Errorf("listen metrics: %w", err)
+		}
+		defer metrics.Close()
+	}
+	closeServers := func() {
+		_ = s.httpServer.Close()
+		if s.metricsServer != nil {
+			_ = s.metricsServer.Close()
+		}
+	}
+	defer closeServers()
 
-	errs := make(chan error, 1)
-	go func() {
-		errs <- s.httpServer.ListenAndServe()
-	}()
+	errs := make(chan error, 2)
+	start := func(name string, server *http.Server, listener net.Listener) {
+		s.observability.logger.Info("listener started", "endpoint", name, "addr", listener.Addr().String())
+		go func() { errs <- fmt.Errorf("serve %s: %w", name, server.Serve(listener)) }()
+	}
+	start("api", s.httpServer, api)
+	remaining := 1
+	if metrics != nil {
+		start("metrics", s.metricsServer, metrics)
+		remaining++
+	}
 
+	var runErr error
 	select {
 	case err := <-errs:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
+		remaining--
+		if !errors.Is(err, http.ErrServerClosed) {
+			runErr = err
 		}
-		return fmt.Errorf("serve: %w", err)
+		closeServers() // An exited listener must not leave its sibling running.
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
-
+		// Keep metrics available while active API requests drain.
 		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
+			runErr = fmt.Errorf("shutdown API: %w", err)
 			_ = s.httpServer.Close()
-			<-errs
-			return fmt.Errorf("shutdown: %w", err)
 		}
-
-		if err := <-errs; err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return fmt.Errorf("serve: %w", err)
+		if s.metricsServer != nil {
+			if err := s.metricsServer.Shutdown(shutdownCtx); err != nil && runErr == nil {
+				runErr = fmt.Errorf("shutdown metrics: %w", err)
+			}
 		}
-		return nil
+		closeServers()
 	}
+	for ; remaining > 0; remaining-- {
+		if err := <-errs; !errors.Is(err, http.ErrServerClosed) && runErr == nil {
+			runErr = err
+		}
+	}
+	s.observability.logger.Info("gateway stopped")
+	return runErr
 }
 
 func (s *Server) Handler() http.Handler {

@@ -18,3 +18,4 @@ jobs:
           cache: false
       - run: make check
       - run: make build
+      - run: make test-vllm-runner
