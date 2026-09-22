@@ -1,0 +1,19 @@
+.git
+.github
+.DS_Store
+**/.DS_Store
+
+# Local build and editor artifacts
+bin/
+dist/
+coverage/
+*.out
+*.log
+.idea/
+.vscode/
+
+# Files not needed to compile the gateway
+README.md
+deploy/
+models.json
+scripts/

@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-const shutdownTimeout = 5 * time.Second
+const shutdownTimeout = 5 * time.Minute
 
 type Model struct {
 	Name string `json:"name"`
