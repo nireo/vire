@@ -171,6 +171,8 @@ class Stack:
         entry = {"name": name, "url": f"http://127.0.0.1:{backend_port}"}
         if model == DEFAULT_MODEL:
             entry["display_name"] = "Qwen 2.5 0.5B Instruct"
+            if name == "qwen2.5-0.5b-instruct":
+                entry["aliases"] = ["example"]
             entry["pricing"] = {"input_rate_micro_per_million": 100000,
                                 "output_rate_micro_per_million": 200000,
                                 "example": True}

@@ -184,6 +184,13 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "request must be a JSON object with a nonempty model string")
 		return
 	}
+	if canonical, isAlias := s.aliases[model]; isAlias {
+		model = canonical
+		fields["model"], _ = json.Marshal(canonical)
+		// Aliases are accepted for older clients, but backends and metering use
+		// the canonical ID. Ordinary requests retain their original bytes.
+		body, _ = json.Marshal(fields)
+	}
 	proxy, ok := s.proxies[model]
 	if !ok {
 		writeAPIError(w, http.StatusNotFound, "unknown model")

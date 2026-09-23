@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 )
@@ -21,6 +22,7 @@ type Model struct {
 	URL         string        `json:"url"`
 	DisplayName string        `json:"display_name,omitempty"`
 	Pricing     *ModelPricing `json:"pricing,omitempty"`
+	Aliases     []string      `json:"aliases,omitempty"`
 }
 
 // Rates are micro-USD per million tokens, matching the usage ledger.
@@ -34,6 +36,7 @@ type Server struct {
 	httpServer      *http.Server
 	models          []Model
 	proxies         map[string]*modelRoute
+	aliases         map[string]string
 	transport       *http.Transport
 	metricsServer   *http.Server
 	observability   *observability
@@ -76,6 +79,7 @@ func NewServerWithOptions(addr, registryPath string, options Options) (*Server, 
 		},
 		models:          models,
 		proxies:         make(map[string]*modelRoute, len(models)),
+		aliases:         make(map[string]string),
 		transport:       transport,
 		observability:   telemetry,
 		accountStore:    options.AccountStore,
@@ -101,6 +105,9 @@ func NewServerWithOptions(addr, registryPath string, options Options) (*Server, 
 		}
 	}
 	for _, model := range models {
+		for _, alias := range model.Aliases {
+			server.aliases[alias] = model.Name
+		}
 		// loadModels has already validated the URL.
 		target, _ := url.Parse(model.URL)
 		route := server.proxies[model.Name]
@@ -171,8 +178,8 @@ func loadModels(path string) ([]Model, error) {
 		if model.Pricing != nil && (model.Pricing.InputRateMicroPerMillion < 0 || model.Pricing.OutputRateMicroPerMillion < 0) {
 			return nil, fmt.Errorf("model %d: pricing rates must be nonnegative", i)
 		}
-		if previous, ok := metadata[model.Name]; ok && (previous.DisplayName != model.DisplayName || !samePricing(previous.Pricing, model.Pricing)) {
-			return nil, fmt.Errorf("model %d: replicas of %q must share display_name and pricing", i, model.Name)
+		if previous, ok := metadata[model.Name]; ok && (previous.DisplayName != model.DisplayName || !samePricing(previous.Pricing, model.Pricing) || !slices.Equal(previous.Aliases, model.Aliases)) {
+			return nil, fmt.Errorf("model %d: replicas of %q must share display_name, pricing, and aliases", i, model.Name)
 		}
 		metadata[model.Name] = model
 		target, err := url.Parse(model.URL)
@@ -188,6 +195,21 @@ func loadModels(path string) ([]Model, error) {
 			return nil, fmt.Errorf("model %d: duplicate destination for %q", i, model.Name)
 		}
 		destinations[key] = true
+	}
+	aliasOwners := make(map[string]string)
+	for name, model := range metadata {
+		for _, alias := range model.Aliases {
+			if strings.TrimSpace(alias) == "" || alias != strings.TrimSpace(alias) || alias == name {
+				return nil, fmt.Errorf("model %q: aliases must be nonempty, trimmed, and different from the model name", name)
+			}
+			if _, exists := metadata[alias]; exists {
+				return nil, fmt.Errorf("model %q: alias %q conflicts with a model name", name, alias)
+			}
+			if owner, exists := aliasOwners[alias]; exists {
+				return nil, fmt.Errorf("model %q: alias %q is already used by %q", name, alias, owner)
+			}
+			aliasOwners[alias] = name
+		}
 	}
 
 	return models, nil
