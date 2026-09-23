@@ -93,7 +93,7 @@ backend_pid=$!
 wait_ready "http://127.0.0.1:$BACKEND_PORT/health"
 
 "$tmp/gateway" -addr "127.0.0.1:$GATEWAY_PORT" -registry "$tmp/models.json" \
-    -metrics-addr "127.0.0.1:$METRICS_PORT" &
+	-metrics-addr "127.0.0.1:$METRICS_PORT" -insecure-dev &
 gateway_pid=$!
 wait_ready "http://127.0.0.1:$GATEWAY_PORT/health"
 

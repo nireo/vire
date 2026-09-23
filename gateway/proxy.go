@@ -10,13 +10,14 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"sync/atomic"
 
 	"github.com/buraksezer/consistent"
 	"github.com/cespare/xxhash/v2"
 )
 
-const maxRequestBytes = 1 << 20 // 1 MiB; only requests are buffered, never responses.
+const maxRequestBytes = 1 << 20 // 1 MiB for model lookup.
 
 type routeBackend struct {
 	proxy  *httputil.ReverseProxy
@@ -69,6 +70,9 @@ func (route *modelRoute) selectBackend(conversationID string) *routeBackend {
 
 func (route *modelRoute) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conversationID := r.Header.Get("X-Conversation-ID")
+	if accountID, _ := r.Context().Value(accountContextKey{}).(string); accountID != "" && conversationID != "" {
+		conversationID = accountID + "\x00" + conversationID
+	}
 	backend := route.selectBackend(conversationID)
 	if state := observation(r); state != nil {
 		state.model, state.backend = route.model, backend.origin
@@ -86,11 +90,18 @@ func (route *modelRoute) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	backend.proxy.ServeHTTP(w, r)
 }
 
-func newProxy(target *url.URL, transport http.RoundTripper) *httputil.ReverseProxy {
+func newProxy(target *url.URL, transport http.RoundTripper, authenticated bool, backendAPIKey string) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(target)
 			r.Out.Header.Del("X-Conversation-ID") // Gateway-only routing metadata.
+			if authenticated {
+				r.Out.Header.Del("Authorization")
+				r.Out.Header.Del("Accept-Encoding") // Metering observes plain JSON/SSE.
+				if backendAPIKey != "" {
+					r.Out.Header.Set("Authorization", "Bearer "+backendAPIKey)
+				}
+			}
 			if state := observation(r.Out); state != nil {
 				r.Out.Header.Set("X-Request-ID", state.id)
 			}
@@ -98,6 +109,16 @@ func newProxy(target *url.URL, transport http.RoundTripper) *httputil.ReversePro
 		},
 		Transport: transport,
 		ErrorLog:  discardedProxyLog,
+		ModifyResponse: func(response *http.Response) error {
+			if state := observation(response.Request); state != nil && state.usage != nil {
+				state.usage.status = response.StatusCode
+				state.usage.stream = state.usage.stream || strings.HasPrefix(response.Header.Get("Content-Type"), "text/event-stream")
+				if response.StatusCode >= 200 && response.StatusCode < 300 {
+					response.Body = &usageBody{ReadCloser: response.Body, capture: state.usage}
+				}
+			}
+			return nil
+		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			if r.Context().Err() != nil {
 				return
@@ -114,6 +135,9 @@ func newProxy(target *url.URL, transport http.RoundTripper) *httputil.ReversePro
 				if status == http.StatusGatewayTimeout {
 					state.outcome = "upstream_timeout"
 				}
+				if state.usage != nil {
+					state.usage.status = status
+				}
 			}
 			writeAPIError(w, status, message)
 		},
@@ -123,6 +147,20 @@ func newProxy(target *url.URL, transport http.RoundTripper) *httputil.ReversePro
 }
 
 func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
+	identity, ok := s.authenticate(w, r)
+	if !ok {
+		return
+	}
+	if s.inflightLimit != nil {
+		select {
+		case s.inflightLimit <- struct{}{}:
+			defer func() { <-s.inflightLimit }()
+		default:
+			w.Header().Set("Retry-After", "1")
+			writeAPIError(w, http.StatusTooManyRequests, "gateway is at its concurrency limit")
+			return
+		}
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 	defer r.Body.Close()
 	body, err := io.ReadAll(r.Body)
@@ -155,6 +193,43 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	r.ContentLength = int64(len(body))
 	r.GetBody = nil // Do not make the generation request replayable.
+	if s.accountStore != nil {
+		state := observation(r)
+		start := UsageStart{RequestID: state.id, AccountID: identity.AccountID, KeyID: identity.KeyID, Model: model}
+		ctx, cancel := context.WithTimeout(r.Context(), accountQueryTimeout)
+		err := s.accountStore.BeginUsage(ctx, start)
+		cancel()
+		if err != nil {
+			s.observability.meteringErrors.WithLabelValues("begin").Inc()
+			s.observability.logger.Error("could not begin usage record", "request_id", state.id, "error", err)
+			writeAPIError(w, http.StatusServiceUnavailable, "usage store unavailable")
+			return
+		}
+		metered := &usageCapture{stream: string(fields["stream"]) == "true"}
+		state.usage = metered
+		r = r.WithContext(context.WithValue(r.Context(), accountContextKey{}, identity.AccountID))
+		defer func() {
+			incomplete := r.Context().Err() != nil
+			if writer, ok := w.(*observedWriter); ok {
+				_, _, writeFailed := writer.snapshot()
+				incomplete = incomplete || writeFailed
+			}
+			status, outcome, prompt, completion := metered.result(incomplete)
+			finish := UsageFinish{RequestID: state.id, Backend: state.backend, Status: status,
+				Outcome: outcome, PromptTokens: prompt, CompletionTokens: completion}
+			// Client cancellation must not cancel the accounting write.
+			ctx, cancel := context.WithTimeout(context.Background(), accountQueryTimeout)
+			defer cancel()
+			if err := s.accountStore.FinishUsage(ctx, finish); err != nil {
+				s.observability.meteringErrors.WithLabelValues("finish").Inc()
+				s.observability.logger.Error("could not finish usage record", "request_id", state.id, "error", err)
+			} else {
+				s.observability.metered.WithLabelValues(outcome).Inc()
+			}
+		}()
+		proxy.ServeHTTP(w, r)
+		return
+	}
 	proxy.ServeHTTP(w, r)
 }
 

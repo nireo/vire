@@ -15,22 +15,27 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// Options configures telemetry without changing routing. An empty MetricsAddr
-// disables the extra listener; MetricsHandler remains available for embedding.
-// Logger defaults to JSON on stderr. Callers may inject a logger before serving.
+// Options configures telemetry and optional account metering. An empty
+// MetricsAddr disables the extra listener; MetricsHandler remains available for
+// embedding. Logger defaults to JSON on stderr.
 type Options struct {
-	MetricsAddr string
-	Logger      *slog.Logger
+	MetricsAddr   string
+	Logger        *slog.Logger
+	AccountStore  AccountStore
+	BackendAPIKey string
+	MaxInflight   int
 }
 
 type observability struct {
-	registry *prometheus.Registry
-	logger   *slog.Logger
-	requests *prometheus.CounterVec
-	duration *prometheus.HistogramVec
-	headers  *prometheus.HistogramVec
-	inflight *prometheus.GaugeVec
-	routed   *prometheus.CounterVec
+	registry       *prometheus.Registry
+	logger         *slog.Logger
+	requests       *prometheus.CounterVec
+	duration       *prometheus.HistogramVec
+	headers        *prometheus.HistogramVec
+	inflight       *prometheus.GaugeVec
+	routed         *prometheus.CounterVec
+	meteringErrors *prometheus.CounterVec
+	metered        *prometheus.CounterVec
 }
 
 func newObservability(logger *slog.Logger) *observability {
@@ -59,8 +64,16 @@ func newObservability(logger *slog.Logger) *observability {
 			Name: "vire_routed_requests_total",
 			Help: "Backend selections by routing mode; does not imply successful completion.",
 		}, []string{"model", "backend", "routing"}),
+		meteringErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "vire_metering_errors_total",
+			Help: "Failures in the durable usage recording path by stage.",
+		}, []string{"stage"}),
+		metered: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "vire_metered_requests_total",
+			Help: "Durably recorded inference requests by usage outcome.",
+		}, []string{"outcome"}),
 	}
-	o.registry.MustRegister(o.requests, o.duration, o.headers, o.inflight, o.routed,
+	o.registry.MustRegister(o.requests, o.duration, o.headers, o.inflight, o.routed, o.meteringErrors, o.metered,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	return o
 }
@@ -70,6 +83,7 @@ func newObservability(logger *slog.Logger) *observability {
 // Only the writer needs a mutex: ReverseProxy may flush from a timer goroutine.
 type requestObservation struct {
 	id, model, backend, routing, outcome string
+	usage                                *usageCapture
 }
 
 type observationKey struct{}
@@ -207,6 +221,9 @@ func (t observedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	response, err := t.base.RoundTrip(r)
 	if state := observation(r); state != nil && err == nil {
 		t.o.headers.WithLabelValues(state.model, state.backend).Observe(time.Since(started).Seconds())
+	}
+	if response != nil {
+		response.Request = r // Make request-local usage state available to ModifyResponse.
 	}
 	return response, err
 }

@@ -54,6 +54,19 @@ spec:
             - -addr=:8080
             - -registry=/etc/vire/models.json
             - -metrics-addr=:9091
+          env:
+            - name: VIRE_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: vire-account-db
+                  key: url
+                  optional: true
+            - name: VIRE_BACKEND_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: vire-backend-auth
+                  key: api-key
+                  optional: true
           ports:
             - name: http
               containerPort: 8080

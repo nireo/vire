@@ -7,6 +7,15 @@ resources:
   - ../../base
   - namespace.yaml
 
+patches:
+  - target:
+      kind: Deployment
+      name: vire-gateway
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: -insecure-dev
+
 images:
   - name: ghcr.io/nireo/vire
     newName: vire

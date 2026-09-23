@@ -28,6 +28,8 @@ type Server struct {
 	transport     *http.Transport
 	metricsServer *http.Server
 	observability *observability
+	accountStore  AccountStore
+	inflightLimit chan struct{}
 }
 
 func NewServer(addr, registryPath string) (*Server, error) {
@@ -64,6 +66,14 @@ func NewServerWithOptions(addr, registryPath string, options Options) (*Server, 
 		proxies:       make(map[string]*modelRoute, len(models)),
 		transport:     transport,
 		observability: telemetry,
+		accountStore:  options.AccountStore,
+	}
+	if options.AccountStore != nil {
+		limit := options.MaxInflight
+		if limit <= 0 {
+			limit = 32
+		}
+		server.inflightLimit = make(chan struct{}, limit)
 	}
 	if options.MetricsAddr != "" {
 		server.metricsServer = &http.Server{
@@ -85,7 +95,7 @@ func NewServerWithOptions(addr, registryPath string, options Options) (*Server, 
 		}
 		origin := strings.TrimSuffix(target.String(), "/")
 		route.backends = append(route.backends, &routeBackend{
-			proxy:  newProxy(target, observedTransport{base: transport, o: telemetry}),
+			proxy:  newProxy(target, observedTransport{base: transport, o: telemetry}, options.AccountStore != nil, options.BackendAPIKey),
 			origin: origin,
 		})
 		telemetry.inflight.WithLabelValues(model.Name, origin).Set(0)
@@ -99,7 +109,11 @@ func NewServerWithOptions(addr, registryPath string, options Options) (*Server, 
 	}
 
 	mux.HandleFunc("GET /health", healthHandler)
-	mux.HandleFunc("GET /models", server.modelsHandler)
+	if options.AccountStore == nil {
+		mux.HandleFunc("GET /models", server.modelsHandler)
+	} else {
+		mux.HandleFunc("GET /v1/models", server.publicModelsHandler)
+	}
 	mux.HandleFunc("POST /v1/chat/completions", server.handleCompletions)
 
 	return server, nil

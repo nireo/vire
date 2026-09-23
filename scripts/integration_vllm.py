@@ -258,7 +258,7 @@ def run(args):
         result = json_request(backend_port, "/v1/chat/completions", completion_payload(model), args.request_timeout)
         print(f"PASS direct vLLM ({time.monotonic() - started:.2f}s): {validate_completion(result, model)!r}", flush=True)
 
-        processes.start("gateway", [str(executable), "-addr", f"127.0.0.1:{gateway_port}", "-registry", str(registry)])
+        processes.start("gateway", [str(executable), "-addr", f"127.0.0.1:{gateway_port}", "-registry", str(registry), "-insecure-dev"])
         wait_ready(processes, gateway_port, args.startup_timeout)
         require(json_request(gateway_port, "/models", timeout=args.request_timeout) ==
                 [{"name": model, "url": backend_url}], "gateway registry identity mismatch")
