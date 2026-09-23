@@ -83,8 +83,8 @@ func (s *Server) publicModelsHandler(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.authenticate(w, r); !ok {
 		return
 	}
-	names := make([]string, 0, len(s.proxies))
-	for name := range s.proxies {
+	names := make([]string, 0, len(s.catalog))
+	for name := range s.catalog {
 		names = append(names, name)
 	}
 	slices.Sort(names)

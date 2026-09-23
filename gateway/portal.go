@@ -284,7 +284,7 @@ func (s *Server) portalModelsHandler(w http.ResponseWriter, _ *http.Request) {
 		DisplayName string         `json:"display_name"`
 		Pricing     *publicPricing `json:"pricing"`
 	}
-	byName := make(map[string]publicModel, len(s.proxies))
+	byName := make(map[string]publicModel, len(s.catalog))
 	for _, model := range s.models {
 		if _, exists := byName[model.Name]; exists {
 			continue

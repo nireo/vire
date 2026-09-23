@@ -31,15 +31,18 @@ type Options struct {
 }
 
 type observability struct {
-	registry       *prometheus.Registry
-	logger         *slog.Logger
-	requests       *prometheus.CounterVec
-	duration       *prometheus.HistogramVec
-	headers        *prometheus.HistogramVec
-	inflight       *prometheus.GaugeVec
-	routed         *prometheus.CounterVec
-	meteringErrors *prometheus.CounterVec
-	metered        *prometheus.CounterVec
+	registry             *prometheus.Registry
+	logger               *slog.Logger
+	requests             *prometheus.CounterVec
+	duration             *prometheus.HistogramVec
+	headers              *prometheus.HistogramVec
+	inflight             *prometheus.GaugeVec
+	routed               *prometheus.CounterVec
+	meteringErrors       *prometheus.CounterVec
+	metered              *prometheus.CounterVec
+	registryInfo         *prometheus.GaugeVec
+	registryReloadErrors prometheus.Counter
+	backendHealthy       *prometheus.GaugeVec
 }
 
 func newObservability(logger *slog.Logger) *observability {
@@ -76,8 +79,21 @@ func newObservability(logger *slog.Logger) *observability {
 			Name: "vire_metered_requests_total",
 			Help: "Durably recorded inference requests by usage outcome.",
 		}, []string{"outcome"}),
+		registryInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "vire_registry_info",
+			Help: "Active backend membership fingerprint for this gateway.",
+		}, []string{"fingerprint"}),
+		registryReloadErrors: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "vire_registry_reload_errors_total",
+			Help: "Rejected model registry reloads.",
+		}),
+		backendHealthy: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "vire_backend_healthy",
+			Help: "Most recent backend health probe result, one for healthy and zero for unhealthy.",
+		}, []string{"model", "backend"}),
 	}
 	o.registry.MustRegister(o.requests, o.duration, o.headers, o.inflight, o.routed, o.meteringErrors, o.metered,
+		o.registryInfo, o.registryReloadErrors, o.backendHealthy,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	return o
 }

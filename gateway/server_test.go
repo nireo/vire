@@ -75,12 +75,8 @@ func TestNewServerRejectsInvalidRegistry(t *testing.T) {
 		`[{"name":"test","url":"http://localhost:8000","pricing":{"input_rate_micro_per_million":-1,"output_rate_micro_per_million":0}}]`,
 		`[{"name":"test","url":"http://localhost:8000","display_name":"One"},{"name":"test","url":"http://localhost:8001","display_name":"Two"}]`,
 		`[{"name":"test","url":"http://localhost:8000","pricing":{"input_rate_micro_per_million":1,"output_rate_micro_per_million":2}},{"name":"test","url":"http://localhost:8001"}]`,
-		`[{"name":"test","url":"http://localhost:8000","aliases":["test"]}]`,
-		`[{"name":"test","url":"http://localhost:8000","aliases":[" "]}]`,
-		`[{"name":"test","url":"http://localhost:8000","aliases":["old","old"]}]`,
-		`[{"name":"test","url":"http://localhost:8000","aliases":["other"]},{"name":"other","url":"http://localhost:8001"}]`,
-		`[{"name":"test","url":"http://localhost:8000","aliases":["old"]},{"name":"other","url":"http://localhost:8001","aliases":["old"]}]`,
-		`[{"name":"test","url":"http://localhost:8000","aliases":["old"]},{"name":"test","url":"http://localhost:8001"}]`,
+		`[{"name":"test","url":"http://localhost:8000","aliases":["old"]}]`,
+		`[{"name":"test","url":"http://localhost:8000"}] {}`,
 	} {
 		t.Run(contents, func(t *testing.T) {
 			if _, err := NewServer(":8080", writeRegistry(t, contents)); err == nil {

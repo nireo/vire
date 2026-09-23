@@ -20,8 +20,10 @@ import (
 const maxRequestBytes = 1 << 20 // 1 MiB for model lookup.
 
 type routeBackend struct {
-	proxy  *httputil.ReverseProxy
-	origin string
+	proxy   *httputil.ReverseProxy
+	origin  string
+	model   string
+	healthy atomic.Bool
 }
 
 func (backend *routeBackend) String() string { return backend.origin }
@@ -68,12 +70,53 @@ func (route *modelRoute) selectBackend(conversationID string) *routeBackend {
 	return route.backends[index]
 }
 
+// selectHealthyBackend changes the destination only before the request is sent.
+// A failing proxy or an interrupted stream is never replayed.
+func (route *modelRoute) selectHealthyBackend(conversationID string) (*routeBackend, bool) {
+	primary := route.selectBackend(conversationID)
+	if primary.healthy.Load() {
+		return primary, false
+	}
+	if conversationID != "" && route.ring != nil {
+		closest, _ := route.ring.GetClosestN([]byte(conversationID), len(route.backends))
+		for _, member := range closest {
+			backend := member.(*routeBackend)
+			if backend.healthy.Load() {
+				return backend, true
+			}
+		}
+	} else {
+		start := 0
+		for i, backend := range route.backends {
+			if backend == primary {
+				start = i
+				break
+			}
+		}
+		for i := 1; i < len(route.backends); i++ {
+			backend := route.backends[(start+i)%len(route.backends)]
+			if backend.healthy.Load() {
+				return backend, true
+			}
+		}
+	}
+	return nil, false
+}
+
 func (route *modelRoute) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conversationID := r.Header.Get("X-Conversation-ID")
 	if accountID, _ := r.Context().Value(accountContextKey{}).(string); accountID != "" && conversationID != "" {
 		conversationID = accountID + "\x00" + conversationID
 	}
-	backend := route.selectBackend(conversationID)
+	backend, failover := route.selectHealthyBackend(conversationID)
+	if backend == nil {
+		if state := observation(r); state != nil {
+			state.model = route.model
+			state.outcome = "upstream_unavailable"
+		}
+		writeAPIError(w, http.StatusServiceUnavailable, "no healthy inference backend")
+		return
+	}
 	if state := observation(r); state != nil {
 		state.model, state.backend = route.model, backend.origin
 		state.routing = "round_robin"
@@ -81,6 +124,9 @@ func (route *modelRoute) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			state.routing = "single"
 		} else if conversationID != "" {
 			state.routing = "affinity"
+		}
+		if failover {
+			state.routing += "_failover"
 		}
 		route.observability.routed.WithLabelValues(state.model, state.backend, state.routing).Inc()
 		inflight := route.observability.inflight.WithLabelValues(state.model, state.backend)
@@ -221,14 +267,8 @@ func (s *Server) serveCompletions(w http.ResponseWriter, r *http.Request, identi
 		writeAPIError(w, http.StatusBadRequest, "request must be a JSON object with a nonempty model string")
 		return
 	}
-	if canonical, isAlias := s.aliases[model]; isAlias {
-		model = canonical
-		fields["model"], _ = json.Marshal(canonical)
-		// Aliases are accepted for older clients, but backends and metering use
-		// the canonical ID. Ordinary requests retain their original bytes.
-		body, _ = json.Marshal(fields)
-	}
-	proxy, ok := s.proxies[model]
+	routing := s.routing.Load()
+	proxy, ok := routing.proxies[model]
 	if !ok {
 		writeAPIError(w, http.StatusNotFound, "unknown model")
 		return

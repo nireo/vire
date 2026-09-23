@@ -63,39 +63,6 @@ func TestCompletionsRoutesAndPreservesRequest(t *testing.T) {
 	}
 }
 
-func TestCompletionAliasUsesCanonicalModel(t *testing.T) {
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var request struct {
-			Model    string `json:"model"`
-			Messages []struct {
-				Content string `json:"content"`
-			} `json:"messages"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.Model != "qwen2.5-0.5b-instruct" || len(request.Messages) != 1 || request.Messages[0].Content != "Hello" {
-			t.Errorf("upstream request = %+v, error = %v", request, err)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"model":"qwen2.5-0.5b-instruct"}`)
-	}))
-	t.Cleanup(backend.Close)
-	_, front := newProxyTestServer(t, []Model{{Name: "qwen2.5-0.5b-instruct", URL: backend.URL, Aliases: []string{"example"}}})
-	res := postCompletion(t, front.URL, `{"model":"example","messages":[{"role":"user","content":"Hello"}]}`)
-	defer res.Body.Close()
-	if got := readBody(t, res); res.StatusCode != http.StatusOK || got != `{"model":"qwen2.5-0.5b-instruct"}` {
-		t.Fatalf("status=%d body=%s", res.StatusCode, got)
-	}
-	listed, err := testHTTPClient().Get(front.URL + "/api/models")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listed.Body.Close()
-	if got := readBody(t, listed); strings.Contains(got, `"example"`) || !strings.Contains(got, `"qwen2.5-0.5b-instruct"`) {
-		t.Fatalf("public models = %s", got)
-	}
-}
-
 func TestCompletionsRejectsInvalidRequests(t *testing.T) {
 	var calls atomic.Int32
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

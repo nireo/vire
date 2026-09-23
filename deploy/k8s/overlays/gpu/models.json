@@ -1,0 +1,10 @@
+[
+  {
+    "name": "qwen2.5-0.5b-instruct",
+    "url": "http://vire-vllm-0.vire-vllm-headless.vire.svc.cluster.local:8000"
+  },
+  {
+    "name": "qwen2.5-0.5b-instruct",
+    "url": "http://vire-vllm-1.vire-vllm-headless.vire.svc.cluster.local:8000"
+  }
+]

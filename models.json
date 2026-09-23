@@ -3,7 +3,6 @@
     "name": "qwen2.5-0.5b-instruct",
     "url": "http://localhost:8000",
     "display_name": "Qwen 2.5 0.5B Instruct",
-    "aliases": ["example"],
     "pricing": {
       "input_rate_micro_per_million": 100000,
       "output_rate_micro_per_million": 200000,

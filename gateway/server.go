@@ -1,17 +1,20 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
-	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -22,7 +25,6 @@ type Model struct {
 	URL         string        `json:"url"`
 	DisplayName string        `json:"display_name,omitempty"`
 	Pricing     *ModelPricing `json:"pricing,omitempty"`
-	Aliases     []string      `json:"aliases,omitempty"`
 }
 
 // Rates are micro-USD per million tokens, matching the usage ledger.
@@ -35,9 +37,14 @@ type ModelPricing struct {
 type Server struct {
 	httpServer      *http.Server
 	models          []Model
-	proxies         map[string]*modelRoute
-	aliases         map[string]string
+	catalog         map[string]Model
+	routing         atomic.Pointer[routingSnapshot]
+	registryPath    string
+	reloadMu        sync.Mutex
+	backends        map[string]*routeBackend
+	backendAPIKey   string
 	transport       *http.Transport
+	healthClient    *http.Client
 	metricsServer   *http.Server
 	observability   *observability
 	accountStore    AccountStore
@@ -78,9 +85,12 @@ func NewServerWithOptions(addr, registryPath string, options Options) (*Server, 
 			// No WriteTimeout: generation streams can legitimately be long-lived.
 		},
 		models:          models,
-		proxies:         make(map[string]*modelRoute, len(models)),
-		aliases:         make(map[string]string),
+		catalog:         modelCatalog(models),
+		registryPath:    registryPath,
+		backends:        make(map[string]*routeBackend),
+		backendAPIKey:   options.BackendAPIKey,
 		transport:       transport,
+		healthClient:    &http.Client{Transport: transport, Timeout: 2 * time.Second},
 		observability:   telemetry,
 		accountStore:    options.AccountStore,
 		portalStore:     options.PortalStore,
@@ -104,31 +114,9 @@ func NewServerWithOptions(addr, registryPath string, options Options) (*Server, 
 			IdleTimeout:       30 * time.Second,
 		}
 	}
-	for _, model := range models {
-		for _, alias := range model.Aliases {
-			server.aliases[alias] = model.Name
-		}
-		// loadModels has already validated the URL.
-		target, _ := url.Parse(model.URL)
-		route := server.proxies[model.Name]
-		if route == nil {
-			route = &modelRoute{model: model.Name, observability: telemetry}
-			server.proxies[model.Name] = route
-		}
-		origin := strings.TrimSuffix(target.String(), "/")
-		route.backends = append(route.backends, &routeBackend{
-			proxy:  newProxy(target, observedTransport{base: transport, o: telemetry}, options.AccountStore != nil, options.BackendAPIKey),
-			origin: origin,
-		})
-		telemetry.inflight.WithLabelValues(model.Name, origin).Set(0)
-		telemetry.headers.WithLabelValues(model.Name, origin)
-		for _, mode := range []string{"single", "affinity", "round_robin"} {
-			telemetry.routed.WithLabelValues(model.Name, origin, mode)
-		}
-	}
-	for _, route := range server.proxies {
-		route.buildRing()
-	}
+	routing, _ := server.buildRouting(models)
+	server.routing.Store(routing)
+	telemetry.registryInfo.WithLabelValues(routing.fingerprint).Set(1)
 
 	mux.HandleFunc("GET /health", healthHandler)
 	if options.AccountStore == nil {
@@ -160,8 +148,13 @@ func loadModels(path string) ([]Model, error) {
 	}
 
 	var models []Model
-	if err := json.Unmarshal(data, &models); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&models); err != nil {
 		return nil, err
+	}
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return nil, errors.New("registry must contain only one JSON array")
 	}
 	if models == nil {
 		return nil, errors.New("registry must be a JSON array")
@@ -180,8 +173,8 @@ func loadModels(path string) ([]Model, error) {
 		if model.Pricing != nil && (model.Pricing.InputRateMicroPerMillion < 0 || model.Pricing.OutputRateMicroPerMillion < 0) {
 			return nil, fmt.Errorf("model %d: pricing rates must be nonnegative", i)
 		}
-		if previous, ok := metadata[model.Name]; ok && (previous.DisplayName != model.DisplayName || !samePricing(previous.Pricing, model.Pricing) || !slices.Equal(previous.Aliases, model.Aliases)) {
-			return nil, fmt.Errorf("model %d: replicas of %q must share display_name, pricing, and aliases", i, model.Name)
+		if previous, ok := metadata[model.Name]; ok && (previous.DisplayName != model.DisplayName || !samePricing(previous.Pricing, model.Pricing)) {
+			return nil, fmt.Errorf("model %d: replicas of %q must share display_name and pricing", i, model.Name)
 		}
 		metadata[model.Name] = model
 		target, err := url.Parse(model.URL)
@@ -198,22 +191,6 @@ func loadModels(path string) ([]Model, error) {
 		}
 		destinations[key] = true
 	}
-	aliasOwners := make(map[string]string)
-	for name, model := range metadata {
-		for _, alias := range model.Aliases {
-			if strings.TrimSpace(alias) == "" || alias != strings.TrimSpace(alias) || alias == name {
-				return nil, fmt.Errorf("model %q: aliases must be nonempty, trimmed, and different from the model name", name)
-			}
-			if _, exists := metadata[alias]; exists {
-				return nil, fmt.Errorf("model %q: alias %q conflicts with a model name", name, alias)
-			}
-			if owner, exists := aliasOwners[alias]; exists {
-				return nil, fmt.Errorf("model %q: alias %q is already used by %q", name, alias, owner)
-			}
-			aliasOwners[alias] = name
-		}
-	}
-
 	return models, nil
 }
 
@@ -229,6 +206,9 @@ func (s *Server) Run(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return nil
 	}
+	runCtx, stopWorkers := context.WithCancel(ctx)
+	defer stopWorkers()
+	s.probeBackends(runCtx)
 	// Bind both sockets before serving either endpoint. A configuration error
 	// must not leave a partially running gateway behind.
 	api, err := net.Listen("tcp", s.httpServer.Addr)
@@ -258,6 +238,8 @@ func (s *Server) Run(ctx context.Context) error {
 		go func() { errs <- fmt.Errorf("serve %s: %w", name, server.Serve(listener)) }()
 	}
 	start("api", s.httpServer, api)
+	go s.watchRegistry(runCtx)
+	go s.watchBackends(runCtx)
 	remaining := 1
 	if metrics != nil {
 		start("metrics", s.metricsServer, metrics)
@@ -302,7 +284,7 @@ func (s *Server) Handler() http.Handler {
 
 // PricedModels returns one configured rate per model, regardless of replica count.
 func (s *Server) PricedModels() []Model {
-	seen := make(map[string]bool, len(s.proxies))
+	seen := make(map[string]bool, len(s.catalog))
 	var priced []Model
 	for _, model := range s.models {
 		if model.Pricing != nil && !seen[model.Name] {
@@ -322,5 +304,5 @@ func healthHandler(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) modelsHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(s.models)
+	_ = json.NewEncoder(w).Encode(s.routing.Load().models)
 }

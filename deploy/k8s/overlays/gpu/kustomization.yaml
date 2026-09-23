@@ -5,6 +5,7 @@ namespace: vire
 
 resources:
   - ../../base
+  - ../../vllm
   - namespace.yaml
 
 patches:
@@ -12,9 +13,9 @@ patches:
       kind: Deployment
       name: vire-gateway
     patch: |-
-      - op: add
-        path: /spec/template/spec/containers/0/args/-
-        value: -insecure-dev
+      - op: replace
+        path: /spec/template/spec/containers/0/env/0/valueFrom/secretKeyRef/optional
+        value: false
 
 images:
   - name: ghcr.io/nireo/vire
@@ -27,7 +28,6 @@ configMapGenerator:
       - models.json
 
 generatorOptions:
-  # Keep the name stable so kubelet refreshes the mounted registry in running pods.
   disableNameSuffixHash: true
   labels:
     app.kubernetes.io/name: vire
