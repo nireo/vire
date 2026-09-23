@@ -130,7 +130,7 @@ func (o *observability) wrap(next http.Handler) http.Handler {
 			}
 			route := "unmatched"
 			switch r.Pattern {
-			case "GET /health", "GET /models", "POST /v1/chat/completions":
+			case "GET /health", "GET /models", "POST /v1/chat/completions", "POST /api/chat/completions":
 				route = r.Pattern
 			}
 			duration := time.Since(started).Seconds()

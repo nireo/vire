@@ -151,6 +151,43 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	s.serveCompletions(w, r, identity)
+}
+
+// The portal uses its HttpOnly session cookie; no API secret reaches JavaScript.
+func (s *Server) portalChatHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if !s.browserPost(w, r) {
+		return
+	}
+	account, _, ok := s.sessionAccount(w, r)
+	if !ok {
+		return
+	}
+	if s.accountStore == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "chat is unavailable")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), accountQueryTimeout)
+	keyID, err := s.portalStore.ChatKeyID(ctx, account.AccountID)
+	cancel()
+	if err != nil {
+		s.observability.logger.Error("chat key lookup failed", "error", err)
+		writeAPIError(w, http.StatusServiceUnavailable, "chat is unavailable")
+		return
+	}
+	if keyID == "" {
+		writeAPIError(w, http.StatusForbidden, "an active API key is required for chat")
+		return
+	}
+	// The session cookie belongs to the portal and must never reach a model backend.
+	r.Header.Del("Cookie")
+	r.Header.Del("Authorization")
+	r.URL.Path = "/v1/chat/completions"
+	s.serveCompletions(w, r, KeyIdentity{AccountID: account.AccountID, KeyID: keyID})
+}
+
+func (s *Server) serveCompletions(w http.ResponseWriter, r *http.Request, identity KeyIdentity) {
 	if s.inflightLimit != nil {
 		select {
 		case s.inflightLimit <- struct{}{}:

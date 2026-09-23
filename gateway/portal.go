@@ -60,6 +60,7 @@ type PortalStore interface {
 	Session(context.Context, string) (PortalAccount, error)
 	Logout(context.Context, string) error
 	Usage(context.Context, string, time.Time) ([]PortalUsage, error)
+	ChatKeyID(context.Context, string) (string, error)
 }
 
 func validSignup(email, name string) bool {

@@ -113,6 +113,15 @@ func (s *Store) Session(ctx context.Context, token string) (gateway.PortalAccoun
 	return account, err
 }
 
+func (s *Store) ChatKeyID(ctx context.Context, accountID string) (string, error) {
+	var keyID string
+	err := s.pool.QueryRow(ctx, `SELECT id FROM api_keys WHERE account_id=$1 AND revoked_at IS NULL ORDER BY created_at, id LIMIT 1`, accountID).Scan(&keyID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return keyID, err
+}
+
 func (s *Store) Logout(ctx context.Context, token string) error {
 	digest, ok := sessionDigest(token)
 	if !ok {

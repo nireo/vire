@@ -1,5 +1,6 @@
 import { createMemo, createResource, createSignal, For, onMount, Show } from "solid-js";
 import { render } from "solid-js/web";
+import { ChatView } from "./chat";
 import "./style.css";
 
 type Signup = { account_id: string; key_id: string; api_key: string };
@@ -158,11 +159,20 @@ function App() {
         <a class="brand" href="/" onClick={(event) => { event.preventDefault(); go("/"); }} aria-label="Vire home">vire</a>
         <nav class="header-nav" aria-label="Main navigation">
           <a href="/" aria-current={path() === "/" ? "page" : undefined} onClick={(event) => { event.preventDefault(); go("/"); }}>Models</a>
+          <a href="/chat" aria-current={path() === "/chat" ? "page" : undefined} onClick={(event) => { event.preventDefault(); go("/chat"); }}>Chat</a>
           <a href="/account" aria-current={path() === "/account" ? "page" : undefined} onClick={(event) => { event.preventDefault(); go("/account"); }}>Account</a>
         </nav>
       </div>
     </header>
     <main>
+      <div hidden={path() !== "/chat"}>
+        <Show when={!account.loading} fallback={<p class="muted">Loading account…</p>}>
+          <Show when={account()} fallback={<section class="chat-signin"><h1>Chat</h1><p>Sign in to chat with an available model.</p><button class="primary-button" type="button" onClick={() => go("/account")}>Sign in</button></section>}>
+            {(current) => <ChatView models={models() ?? []} accountID={current().account_id} />}
+          </Show>
+        </Show>
+      </div>
+      <Show when={path() !== "/chat"}>
       <Show when={path() === "/account"} fallback={<>
         <section class="intro" aria-labelledby="page-title"><h1 id="page-title">Models and access</h1><p>Browse available models and create an account to get an API key.</p></section>
         <section class="content-section" aria-labelledby="models-title">
@@ -227,6 +237,7 @@ function App() {
             </>}
           </Show>
         </Show>
+      </Show>
       </Show>
     </main>
   </div>;

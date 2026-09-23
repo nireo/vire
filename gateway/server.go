@@ -137,6 +137,7 @@ func NewServerWithOptions(addr, registryPath string, options Options) (*Server, 
 		mux.HandleFunc("GET /v1/models", server.publicModelsHandler)
 	}
 	mux.HandleFunc("POST /v1/chat/completions", server.handleCompletions)
+	mux.HandleFunc("POST /api/chat/completions", server.portalChatHandler)
 	mux.HandleFunc("GET /api/models", server.portalModelsHandler)
 	mux.HandleFunc("POST /api/signup", server.signupHandler)
 	mux.HandleFunc("POST /api/login", server.loginHandler)
@@ -145,6 +146,7 @@ func NewServerWithOptions(addr, registryPath string, options Options) (*Server, 
 	mux.HandleFunc("GET /api/usage", server.usageHandler)
 	if options.WebDir != "" {
 		mux.HandleFunc("GET /account", func(w http.ResponseWriter, r *http.Request) { http.ServeFile(w, r, options.WebDir+"/index.html") })
+		mux.HandleFunc("GET /chat", func(w http.ResponseWriter, r *http.Request) { http.ServeFile(w, r, options.WebDir+"/index.html") })
 		mux.Handle("GET /", http.FileServer(http.Dir(options.WebDir)))
 	}
 
