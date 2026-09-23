@@ -1,0 +1,13 @@
+version: "2"
+sql:
+  - engine: postgresql
+    schema:
+      - internal/accountdb/schema.sql
+      - internal/accountdb/schema_v2.sql
+    queries: internal/accountdb/queries.sql
+    gen:
+      go:
+        package: db
+        out: internal/accountdb/db
+        sql_package: pgx/v5
+        emit_pointers_for_null_types: true
