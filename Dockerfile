@@ -17,17 +17,14 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY cmd/gateway ./cmd/gateway
-COPY cmd/vire-admin ./cmd/vire-admin
 COPY gateway ./gateway
 COPY internal ./internal
 
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/gateway ./cmd/gateway
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/vire-admin ./cmd/vire-admin
 
 FROM gcr.io/distroless/static-debian13:nonroot
 
 COPY --from=build /out/gateway /gateway
-COPY --from=build /out/vire-admin /vire-admin
 COPY --from=web-build /src/web/dist /web
 
 USER 65532:65532
