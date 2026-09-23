@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check test test-race lint check build run dev smoke test-vllm test-vllm-runner
+.PHONY: fmt fmt-check test test-race lint check build run dev smoke web-dev web-build local-up local-down test-vllm test-vllm-runner sqlc-generate sqlc-check
 
 fmt:
 	go fmt ./...
@@ -17,6 +17,13 @@ lint:
 
 check: fmt-check test-race lint
 
+sqlc-generate:
+	sqlc generate
+
+sqlc-check:
+	sqlc compile
+	sqlc diff
+
 build:
 	go build ./...
 
@@ -28,6 +35,19 @@ dev:
 
 smoke:
 	@bash scripts/smoke.sh
+
+web-dev:
+	cd web && pnpm dev
+
+web-build:
+	cd web && pnpm build
+
+# Real vLLM, disposable Postgres, gateway, and Vite portal.
+local-up:
+	python3 scripts/local_stack.py up
+
+local-down:
+	python3 scripts/local_stack.py down
 
 # Opt-in: starts real inference and may download model weights.
 test-vllm:

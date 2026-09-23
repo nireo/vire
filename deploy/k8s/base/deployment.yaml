@@ -54,6 +54,7 @@ spec:
             - -addr=:8080
             - -registry=/etc/vire/models.json
             - -metrics-addr=:9091
+            - -web-dir=/web
           env:
             - name: VIRE_DATABASE_URL
               valueFrom:

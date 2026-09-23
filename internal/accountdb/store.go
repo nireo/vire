@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nireo/vire/gateway"
@@ -123,6 +124,51 @@ func (s *Store) CreateAccount(ctx context.Context, email, name string) (string, 
 		return "", err
 	}
 	return accountID, tx.Commit(ctx)
+}
+
+// Signup creates the account and its first API key in one transaction. The
+// plaintext key is returned once and never stored.
+func (s *Store) Signup(ctx context.Context, email, name string) (gateway.SignupResult, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	name = strings.TrimSpace(name)
+	if email == "" || !strings.Contains(email, "@") || name == "" {
+		return gateway.SignupResult{}, errors.New("a valid email and nonempty account name are required")
+	}
+	userID, accountID, keyID := rand.Text(), rand.Text(), rand.Text()
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return gateway.SignupResult{}, err
+	}
+	token := "vire_" + keyID + "_" + base64.RawURLEncoding.EncodeToString(secret)
+	digest := sha256.Sum256([]byte(token))
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return gateway.SignupResult{}, err
+	}
+	defer tx.Rollback(ctx)
+	queries := s.queries.WithTx(tx)
+	if err := queries.CreateUser(ctx, db.CreateUserParams{ID: userID, Email: email}); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "users_email_key" {
+			return gateway.SignupResult{}, gateway.ErrEmailTaken
+		}
+		return gateway.SignupResult{}, err
+	}
+	if err := queries.CreateAccount(ctx, db.CreateAccountParams{ID: accountID, Name: name}); err != nil {
+		return gateway.SignupResult{}, err
+	}
+	if err := queries.AddAccountOwner(ctx, db.AddAccountOwnerParams{AccountID: accountID, UserID: userID}); err != nil {
+		return gateway.SignupResult{}, err
+	}
+	if err := queries.CreateAPIKey(ctx, db.CreateAPIKeyParams{
+		ID: keyID, AccountID: accountID, CreatedByUserID: userID, Name: "Default", TokenHash: digest[:],
+	}); err != nil {
+		return gateway.SignupResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return gateway.SignupResult{}, err
+	}
+	return gateway.SignupResult{AccountID: accountID, KeyID: keyID, APIKey: token}, nil
 }
 
 // IssueKey returns the secret once. Only its SHA-256 digest is retained; the

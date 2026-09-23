@@ -139,6 +139,40 @@ func TestAccountLifecycleAndRollup(t *testing.T) {
 	}
 }
 
+func TestSignupCreatesAccountAndKeyAtomically(t *testing.T) {
+	url := os.Getenv("VIRE_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("VIRE_TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	store, err := Open(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	name := "Signup test " + time.Now().Format("20060102150405.000000000")
+	email := "signup-" + time.Now().Format("20060102150405.000000000") + "@example.com"
+	result, err := store.Signup(ctx, email, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := store.Authenticate(ctx, result.APIKey)
+	if err != nil || identity != (gateway.KeyIdentity{AccountID: result.AccountID, KeyID: result.KeyID}) {
+		t.Fatalf("identity=%+v err=%v", identity, err)
+	}
+	if _, err := store.Signup(ctx, email, name); !errors.Is(err, gateway.ErrEmailTaken) {
+		t.Fatalf("duplicate signup error=%v", err)
+	}
+	var count int
+	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM accounts WHERE name=$1`, name).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("account count=%d err=%v", count, err)
+	}
+}
+
 func TestGatewayUsageAgainstPostgres(t *testing.T) {
 	url := os.Getenv("VIRE_TEST_DATABASE_URL")
 	if url == "" {

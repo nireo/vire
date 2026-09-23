@@ -23,6 +23,7 @@ type config struct {
 	insecureDev   bool
 	backendAPIKey string
 	maxInflight   int
+	webDir        string
 }
 
 func main() {
@@ -43,6 +44,7 @@ func run(logger *slog.Logger) error {
 	defer stop()
 
 	var accounts gateway.AccountStore
+	var signup gateway.SignupStore
 	if cfg.databaseURL != "" {
 		store, err := openAccountStore(ctx, cfg.databaseURL)
 		if err != nil {
@@ -50,6 +52,7 @@ func run(logger *slog.Logger) error {
 		}
 		defer store.Close()
 		accounts = store
+		signup = store
 		go maintainAccounts(ctx, store, logger)
 	} else {
 		logger.Warn("unauthenticated development mode enabled")
@@ -59,6 +62,8 @@ func run(logger *slog.Logger) error {
 		MetricsAddr:   cfg.metricsAddr,
 		Logger:        logger,
 		AccountStore:  accounts,
+		SignupStore:   signup,
+		WebDir:        cfg.webDir,
 		BackendAPIKey: cfg.backendAPIKey,
 		MaxInflight:   cfg.maxInflight,
 	})
@@ -79,6 +84,7 @@ func parseConfig() config {
 	insecureDev := flag.Bool("insecure-dev", false, "allow unauthenticated requests for local development only")
 	backendAPIKey := flag.String("backend-api-key", os.Getenv("VIRE_BACKEND_API_KEY"), "separate credential sent to inference backends")
 	maxInflight := flag.Int("max-inflight", 32, "maximum simultaneous metered inference requests per gateway")
+	webDir := flag.String("web-dir", "", "optional built portal directory to serve at /")
 	flag.Parse()
 	return config{
 		addr:          *addr,
@@ -88,6 +94,7 @@ func parseConfig() config {
 		insecureDev:   *insecureDev,
 		backendAPIKey: *backendAPIKey,
 		maxInflight:   *maxInflight,
+		webDir:        *webDir,
 	}
 }
 

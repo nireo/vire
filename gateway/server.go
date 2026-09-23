@@ -29,6 +29,7 @@ type Server struct {
 	metricsServer *http.Server
 	observability *observability
 	accountStore  AccountStore
+	signupStore   SignupStore
 	inflightLimit chan struct{}
 }
 
@@ -67,6 +68,7 @@ func NewServerWithOptions(addr, registryPath string, options Options) (*Server, 
 		transport:     transport,
 		observability: telemetry,
 		accountStore:  options.AccountStore,
+		signupStore:   options.SignupStore,
 	}
 	if options.AccountStore != nil {
 		limit := options.MaxInflight
@@ -115,6 +117,11 @@ func NewServerWithOptions(addr, registryPath string, options Options) (*Server, 
 		mux.HandleFunc("GET /v1/models", server.publicModelsHandler)
 	}
 	mux.HandleFunc("POST /v1/chat/completions", server.handleCompletions)
+	mux.HandleFunc("GET /api/models", server.portalModelsHandler)
+	mux.HandleFunc("POST /api/signup", server.signupHandler)
+	if options.WebDir != "" {
+		mux.Handle("GET /", http.FileServer(http.Dir(options.WebDir)))
+	}
 
 	return server, nil
 }

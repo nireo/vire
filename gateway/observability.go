@@ -22,6 +22,8 @@ type Options struct {
 	MetricsAddr   string
 	Logger        *slog.Logger
 	AccountStore  AccountStore
+	SignupStore   SignupStore
+	WebDir        string
 	BackendAPIKey string
 	MaxInflight   int
 }
