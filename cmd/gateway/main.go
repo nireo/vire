@@ -6,8 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,14 +18,16 @@ import (
 )
 
 type config struct {
-	addr          string
-	registry      string
-	metricsAddr   string
-	databaseURL   string
-	insecureDev   bool
-	backendAPIKey string
-	maxInflight   int
-	webDir        string
+	addr            string
+	registry        string
+	metricsAddr     string
+	databaseURL     string
+	insecureDev     bool
+	backendAPIKey   string
+	maxInflight     int
+	webDir          string
+	insecureCookies bool
+	portalOrigin    string
 }
 
 func main() {
@@ -44,7 +48,7 @@ func run(logger *slog.Logger) error {
 	defer stop()
 
 	var accounts gateway.AccountStore
-	var signup gateway.SignupStore
+	var portal gateway.PortalStore
 	if cfg.databaseURL != "" {
 		store, err := openAccountStore(ctx, cfg.databaseURL)
 		if err != nil {
@@ -52,20 +56,22 @@ func run(logger *slog.Logger) error {
 		}
 		defer store.Close()
 		accounts = store
-		signup = store
+		portal = store
 		go maintainAccounts(ctx, store, logger)
 	} else {
 		logger.Warn("unauthenticated development mode enabled")
 	}
 
 	server, err := gateway.NewServerWithOptions(cfg.addr, cfg.registry, gateway.Options{
-		MetricsAddr:   cfg.metricsAddr,
-		Logger:        logger,
-		AccountStore:  accounts,
-		SignupStore:   signup,
-		WebDir:        cfg.webDir,
-		BackendAPIKey: cfg.backendAPIKey,
-		MaxInflight:   cfg.maxInflight,
+		MetricsAddr:     cfg.metricsAddr,
+		Logger:          logger,
+		AccountStore:    accounts,
+		PortalStore:     portal,
+		InsecureCookies: cfg.insecureCookies,
+		PortalOrigin:    cfg.portalOrigin,
+		WebDir:          cfg.webDir,
+		BackendAPIKey:   cfg.backendAPIKey,
+		MaxInflight:     cfg.maxInflight,
 	})
 	if err != nil {
 		return fmt.Errorf("gateway initialization failed: %w", err)
@@ -85,16 +91,20 @@ func parseConfig() config {
 	backendAPIKey := flag.String("backend-api-key", os.Getenv("VIRE_BACKEND_API_KEY"), "separate credential sent to inference backends")
 	maxInflight := flag.Int("max-inflight", 32, "maximum simultaneous metered inference requests per gateway")
 	webDir := flag.String("web-dir", "", "optional built portal directory to serve at /")
+	insecureCookies := flag.Bool("insecure-cookies", false, "allow HTTP session cookies for local development")
+	portalOrigin := flag.String("portal-origin", "", "additional exact browser origin for the Vite development proxy")
 	flag.Parse()
 	return config{
-		addr:          *addr,
-		registry:      *registry,
-		metricsAddr:   *metricsAddr,
-		databaseURL:   *databaseURL,
-		insecureDev:   *insecureDev,
-		backendAPIKey: *backendAPIKey,
-		maxInflight:   *maxInflight,
-		webDir:        *webDir,
+		addr:            *addr,
+		registry:        *registry,
+		metricsAddr:     *metricsAddr,
+		databaseURL:     *databaseURL,
+		insecureDev:     *insecureDev,
+		backendAPIKey:   *backendAPIKey,
+		maxInflight:     *maxInflight,
+		webDir:          *webDir,
+		insecureCookies: *insecureCookies,
+		portalOrigin:    *portalOrigin,
 	}
 }
 
@@ -104,6 +114,15 @@ func (cfg config) validate() error {
 	}
 	if cfg.maxInflight <= 0 {
 		return errors.New("-max-inflight must be positive")
+	}
+	if cfg.insecureCookies && !strings.HasPrefix(cfg.addr, "127.0.0.1:") && !strings.HasPrefix(cfg.addr, "localhost:") && !strings.HasPrefix(cfg.addr, "[::1]:") {
+		return errors.New("-insecure-cookies requires a loopback listen address")
+	}
+	if cfg.portalOrigin != "" {
+		u, err := url.Parse(cfg.portalOrigin)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+			return errors.New("-portal-origin must be an HTTP(S) origin without a path")
+		}
 	}
 	return nil
 }

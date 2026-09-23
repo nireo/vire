@@ -20,7 +20,7 @@ import (
 	"github.com/nireo/vire/internal/accountdb/db"
 )
 
-//go:embed schema.sql schema_v2.sql
+//go:embed schema.sql schema_v2.sql schema_v3.sql
 var schemaFS embed.FS
 
 type Store struct {
@@ -63,7 +63,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version); err != nil {
 		return err
 	}
-	if version > 2 {
+	if version > 3 {
 		return fmt.Errorf("database schema version %d is newer than this gateway", version)
 	}
 	if version == 0 {
@@ -95,44 +95,38 @@ func (s *Store) Migrate(ctx context.Context) error {
 		if _, err := tx.Exec(ctx, `INSERT INTO schema_migrations(version) VALUES (2)`); err != nil {
 			return err
 		}
+		version = 2
+	}
+	if version == 2 {
+		schema, err := schemaFS.ReadFile("schema_v3.sql")
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, string(schema)); err != nil {
+			return fmt.Errorf("apply schema v3: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO schema_migrations(version) VALUES (3)`); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }
 
-// CreateAccount creates the first user as the account owner. A UI can later use
-// an external identity provider and attach its subject to this user record.
-func (s *Store) CreateAccount(ctx context.Context, email, name string) (string, error) {
-	email = strings.ToLower(strings.TrimSpace(email))
-	name = strings.TrimSpace(name)
-	if email == "" || !strings.Contains(email, "@") || name == "" {
-		return "", errors.New("a valid email and nonempty account name are required")
-	}
-	userID, accountID := rand.Text(), rand.Text()
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer tx.Rollback(ctx)
-	queries := s.queries.WithTx(tx)
-	if err := queries.CreateUser(ctx, db.CreateUserParams{ID: userID, Email: email}); err != nil {
-		return "", err
-	}
-	if err := queries.CreateAccount(ctx, db.CreateAccountParams{ID: accountID, Name: name}); err != nil {
-		return "", err
-	}
-	if err := queries.AddAccountOwner(ctx, db.AddAccountOwnerParams{AccountID: accountID, UserID: userID}); err != nil {
-		return "", err
-	}
-	return accountID, tx.Commit(ctx)
-}
-
 // Signup creates the account and its first API key in one transaction. The
 // plaintext key is returned once and never stored.
-func (s *Store) Signup(ctx context.Context, email, name string) (gateway.SignupResult, error) {
+func (s *Store) Signup(ctx context.Context, email, name, password string) (gateway.SignupResult, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	name = strings.TrimSpace(name)
 	if email == "" || !strings.Contains(email, "@") || name == "" {
 		return gateway.SignupResult{}, errors.New("a valid email and nonempty account name are required")
+	}
+	passwordHash, err := hashPassword(password)
+	if err != nil {
+		return gateway.SignupResult{}, err
+	}
+	sessionToken, sessionHash, err := newSessionToken()
+	if err != nil {
+		return gateway.SignupResult{}, err
 	}
 	userID, accountID, keyID := rand.Text(), rand.Text(), rand.Text()
 	secret := make([]byte, 32)
@@ -154,6 +148,9 @@ func (s *Store) Signup(ctx context.Context, email, name string) (gateway.SignupR
 		}
 		return gateway.SignupResult{}, err
 	}
+	if _, err := tx.Exec(ctx, `INSERT INTO user_passwords(user_id, password_hash) VALUES ($1, $2)`, userID, passwordHash); err != nil {
+		return gateway.SignupResult{}, err
+	}
 	if err := queries.CreateAccount(ctx, db.CreateAccountParams{ID: accountID, Name: name}); err != nil {
 		return gateway.SignupResult{}, err
 	}
@@ -165,10 +162,13 @@ func (s *Store) Signup(ctx context.Context, email, name string) (gateway.SignupR
 	}); err != nil {
 		return gateway.SignupResult{}, err
 	}
+	if _, err := tx.Exec(ctx, `INSERT INTO portal_sessions(token_hash, user_id, account_id, expires_at) VALUES ($1,$2,$3,now() + interval '7 days')`, sessionHash, userID, accountID); err != nil {
+		return gateway.SignupResult{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return gateway.SignupResult{}, err
 	}
-	return gateway.SignupResult{AccountID: accountID, KeyID: keyID, APIKey: token}, nil
+	return gateway.SignupResult{AccountID: accountID, KeyID: keyID, APIKey: token, SessionToken: sessionToken}, nil
 }
 
 // IssueKey returns the secret once. Only its SHA-256 digest is retained; the

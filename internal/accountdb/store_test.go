@@ -35,10 +35,11 @@ func TestAccountLifecycleAndRollup(t *testing.T) {
 	if err := store.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	accountID, err := store.CreateAccount(ctx, "test-"+time.Now().Format("20060102150405.000000000")+"@example.com", "Test account")
+	signup, err := store.Signup(ctx, "test-"+time.Now().Format("20060102150405.000000000")+"@example.com", "Test account", "a sufficiently long password")
 	if err != nil {
 		t.Fatal(err)
 	}
+	accountID := signup.AccountID
 	keyID, token, err := store.IssueKey(ctx, accountID, "test key")
 	if err != nil {
 		t.Fatal(err)
@@ -156,7 +157,7 @@ func TestSignupCreatesAccountAndKeyAtomically(t *testing.T) {
 	}
 	name := "Signup test " + time.Now().Format("20060102150405.000000000")
 	email := "signup-" + time.Now().Format("20060102150405.000000000") + "@example.com"
-	result, err := store.Signup(ctx, email, name)
+	result, err := store.Signup(ctx, email, name, "abcdefghij")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,8 +165,28 @@ func TestSignupCreatesAccountAndKeyAtomically(t *testing.T) {
 	if err != nil || identity != (gateway.KeyIdentity{AccountID: result.AccountID, KeyID: result.KeyID}) {
 		t.Fatalf("identity=%+v err=%v", identity, err)
 	}
-	if _, err := store.Signup(ctx, email, name); !errors.Is(err, gateway.ErrEmailTaken) {
+	if _, err := store.Signup(ctx, email, name, "abcdefghij"); !errors.Is(err, gateway.ErrEmailTaken) {
 		t.Fatalf("duplicate signup error=%v", err)
+	}
+	account, err := store.Session(ctx, result.SessionToken)
+	if err != nil || account.AccountID != result.AccountID || account.Email != email {
+		t.Fatalf("signup session=%+v err=%v", account, err)
+	}
+	if _, err := store.Login(ctx, email, "incorrect password"); !errors.Is(err, gateway.ErrInvalidCredentials) {
+		t.Fatalf("wrong password error=%v", err)
+	}
+	login, err := store.Login(ctx, email, "abcdefghij")
+	if err != nil || login.Account.AccountID != result.AccountID {
+		t.Fatalf("login=%+v err=%v", login, err)
+	}
+	if err := store.Logout(ctx, login.Token); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Session(ctx, login.Token); !errors.Is(err, gateway.ErrInvalidSession) {
+		t.Fatalf("revoked session error=%v", err)
+	}
+	if _, err := store.Usage(ctx, result.AccountID, time.Now().AddDate(0, 0, -29)); err != nil {
+		t.Fatal(err)
 	}
 	var count int
 	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM accounts WHERE name=$1`, name).Scan(&count); err != nil || count != 1 {
@@ -188,10 +209,11 @@ func TestGatewayUsageAgainstPostgres(t *testing.T) {
 	if err := store.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	accountID, err := store.CreateAccount(ctx, "gateway-"+time.Now().Format("20060102150405.000000000")+"@example.com", "Gateway test")
+	signup, err := store.Signup(ctx, "gateway-"+time.Now().Format("20060102150405.000000000")+"@example.com", "Gateway test", "a sufficiently long password")
 	if err != nil {
 		t.Fatal(err)
 	}
+	accountID := signup.AccountID
 	_, key, err := store.IssueKey(ctx, accountID, "integration")
 	if err != nil {
 		t.Fatal(err)
@@ -250,6 +272,10 @@ func TestGatewayUsageAgainstPostgres(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	live, err := store.Usage(ctx, accountID, time.Now().UTC().AddDate(0, 0, -1))
+	if err != nil || len(live) != 1 || live[0].Requests != 2 || live[0].PromptTokens != 8 || live[0].CompletionTokens != 3 {
+		t.Fatalf("live portal usage = %+v, err=%v", live, err)
+	}
 	if err := store.Maintain(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -259,5 +285,9 @@ func TestGatewayUsageAgainstPostgres(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].Complete != 2 || rows[0].PromptTokens != 8 || rows[0].CompletionTokens != 3 {
 		t.Fatalf("gateway daily usage = %+v", rows)
+	}
+	rolled, err := store.Usage(ctx, accountID, time.Now().UTC().AddDate(0, 0, -1))
+	if err != nil || len(rolled) != 1 || rolled[0].Requests != 2 || rolled[0].PromptTokens != 8 || rolled[0].CompletionTokens != 3 {
+		t.Fatalf("rolled portal usage = %+v, err=%v", rolled, err)
 	}
 }

@@ -22,15 +22,17 @@ type Model struct {
 }
 
 type Server struct {
-	httpServer    *http.Server
-	models        []Model
-	proxies       map[string]*modelRoute
-	transport     *http.Transport
-	metricsServer *http.Server
-	observability *observability
-	accountStore  AccountStore
-	signupStore   SignupStore
-	inflightLimit chan struct{}
+	httpServer      *http.Server
+	models          []Model
+	proxies         map[string]*modelRoute
+	transport       *http.Transport
+	metricsServer   *http.Server
+	observability   *observability
+	accountStore    AccountStore
+	portalStore     PortalStore
+	insecureCookies bool
+	portalOrigin    string
+	inflightLimit   chan struct{}
 }
 
 func NewServer(addr, registryPath string) (*Server, error) {
@@ -63,12 +65,14 @@ func NewServerWithOptions(addr, registryPath string, options Options) (*Server, 
 			IdleTimeout:       60 * time.Second,
 			// No WriteTimeout: generation streams can legitimately be long-lived.
 		},
-		models:        models,
-		proxies:       make(map[string]*modelRoute, len(models)),
-		transport:     transport,
-		observability: telemetry,
-		accountStore:  options.AccountStore,
-		signupStore:   options.SignupStore,
+		models:          models,
+		proxies:         make(map[string]*modelRoute, len(models)),
+		transport:       transport,
+		observability:   telemetry,
+		accountStore:    options.AccountStore,
+		portalStore:     options.PortalStore,
+		insecureCookies: options.InsecureCookies,
+		portalOrigin:    options.PortalOrigin,
 	}
 	if options.AccountStore != nil {
 		limit := options.MaxInflight
@@ -119,7 +123,12 @@ func NewServerWithOptions(addr, registryPath string, options Options) (*Server, 
 	mux.HandleFunc("POST /v1/chat/completions", server.handleCompletions)
 	mux.HandleFunc("GET /api/models", server.portalModelsHandler)
 	mux.HandleFunc("POST /api/signup", server.signupHandler)
+	mux.HandleFunc("POST /api/login", server.loginHandler)
+	mux.HandleFunc("POST /api/logout", server.logoutHandler)
+	mux.HandleFunc("GET /api/account", server.accountHandler)
+	mux.HandleFunc("GET /api/usage", server.usageHandler)
 	if options.WebDir != "" {
+		mux.HandleFunc("GET /account", func(w http.ResponseWriter, r *http.Request) { http.ServeFile(w, r, options.WebDir+"/index.html") })
 		mux.Handle("GET /", http.FileServer(http.Dir(options.WebDir)))
 	}
 

@@ -19,13 +19,15 @@ import (
 // MetricsAddr disables the extra listener; MetricsHandler remains available for
 // embedding. Logger defaults to JSON on stderr.
 type Options struct {
-	MetricsAddr   string
-	Logger        *slog.Logger
-	AccountStore  AccountStore
-	SignupStore   SignupStore
-	WebDir        string
-	BackendAPIKey string
-	MaxInflight   int
+	MetricsAddr     string
+	Logger          *slog.Logger
+	AccountStore    AccountStore
+	PortalStore     PortalStore
+	InsecureCookies bool
+	PortalOrigin    string
+	WebDir          string
+	BackendAPIKey   string
+	MaxInflight     int
 }
 
 type observability struct {

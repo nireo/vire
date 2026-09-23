@@ -179,7 +179,8 @@ class Stack:
                         lambda url: name in [item.get("id") for item in get_json(url).get("data", [])])
 
         self.start_child("gateway", [str(STATE / "gateway"), "-addr", f"127.0.0.1:{gateway_port}",
-                                     "-registry", str(registry), "-metrics-addr="], env=database_env)
+                                     "-registry", str(registry), "-metrics-addr=", "-insecure-cookies",
+                                     "-portal-origin", f"http://127.0.0.1:{web_port}"], env=database_env)
         base = f"http://127.0.0.1:{gateway_port}"
         self.wait_ready("gateway", base + "/api/models", 30,
                         lambda url: get_json(url).get("models") == [name])
