@@ -7,13 +7,17 @@ type Account = { account_id: string; name: string; email: string };
 type Model = {
   id: string;
   display_name: string;
-  pricing: { input_usd_per_million: number; output_usd_per_million: number; example: boolean } | null;
+  pricing: { input_usd_per_million: number; output_usd_per_million: number } | null;
 };
 type Usage = {
   day: string; model: string; requests: number; complete: number; incomplete: number; failed: number;
   prompt_tokens: number; completion_tokens: number; estimated_cost_micro: number; priced: number;
 };
 type ApiError = { error?: { message?: string } };
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
 
 async function getJSON<T>(path: string): Promise<T> {
   const response = await fetch(path);
@@ -35,10 +39,18 @@ function App() {
   const [models] = createResource(async () => (await getJSON<{ models: Model[] }>("/api/models")).models);
   const [selectedModelID, setSelectedModelID] = createSignal("");
   const selectedModel = createMemo(() => models()?.find((model) => model.id === selectedModelID()) ?? models()?.[0]);
-  const exampleRequest = createMemo(() => JSON.stringify({
+  const examplePayload = createMemo(() => ({
     model: selectedModel()?.id ?? "",
     messages: [{ role: "user", content: "Hello" }],
-  }, null, 2));
+    max_tokens: 64,
+  }));
+  const exampleRequest = createMemo(() => JSON.stringify(examplePayload(), null, 2));
+  const curlExample = createMemo(() => `curl ${shellQuote(`${location.origin}/v1/chat/completions`)} \\
+  -H 'Content-Type: application/json' \\
+  -H 'Authorization: Bearer YOUR_API_KEY' \\
+  -d ${shellQuote(JSON.stringify(examplePayload()))}`);
+  const [curlCopied, setCurlCopied] = createSignal(false);
+  const [curlCopyError, setCurlCopyError] = createSignal(false);
   const [account, { refetch: refreshAccount }] = createResource(async () => {
     const response = await fetch("/api/account");
     if (response.status === 401) return null;
@@ -116,6 +128,16 @@ function App() {
     catch { setError("Copy failed. Select the key and copy it manually."); }
   }
 
+  async function copyCurl() {
+    try {
+      await navigator.clipboard.writeText(curlExample());
+      setCurlCopied(true);
+      setCurlCopyError(false);
+    } catch {
+      setCurlCopyError(true);
+    }
+  }
+
   const authForm = () => <form onSubmit={submit}>
     <Show when={mode() === "signup"}>
       <label for="name">Account name</label>
@@ -132,11 +154,13 @@ function App() {
 
   return <div class="site-shell">
     <header class="site-header">
-      <a class="brand" href="/" onClick={(event) => { event.preventDefault(); go("/"); }} aria-label="Vire home">vire</a>
-      <nav class="header-nav" aria-label="Main navigation">
-        <a href="/" onClick={(event) => { event.preventDefault(); go("/"); }}>Models</a>
-        <a href="/account" onClick={(event) => { event.preventDefault(); go("/account"); }}>Account</a>
-      </nav>
+      <div class="site-header-inner">
+        <a class="brand" href="/" onClick={(event) => { event.preventDefault(); go("/"); }} aria-label="Vire home">vire</a>
+        <nav class="header-nav" aria-label="Main navigation">
+          <a href="/" aria-current={path() === "/" ? "page" : undefined} onClick={(event) => { event.preventDefault(); go("/"); }}>Models</a>
+          <a href="/account" aria-current={path() === "/account" ? "page" : undefined} onClick={(event) => { event.preventDefault(); go("/account"); }}>Account</a>
+        </nav>
+      </div>
     </header>
     <main>
       <Show when={path() === "/account"} fallback={<>
@@ -147,10 +171,12 @@ function App() {
             <Show when={!models.error} fallback={<p class="status-error" role="alert">Model list is unavailable. Refresh to try again.</p>}>
               <Show when={(models()?.length ?? 0) > 0} fallback={<p class="muted">No models are listed yet.</p>}>
                 <div class="model-picker" role="group" aria-label="Select a model"><For each={models()}>{(model) =>
-                  <button class="model-option" classList={{ selected: selectedModel()?.id === model.id }} type="button" aria-pressed={selectedModel()?.id === model.id} onClick={() => setSelectedModelID(model.id)}>
-                    <span class="model-option-name">{model.display_name}</span>
-                    <code>{model.id}</code>
-                    <span class="model-option-price">{model.pricing ? `${model.pricing.example ? "Example · " : ""}Input $${model.pricing.input_usd_per_million.toFixed(2)} / 1M tokens` : "Pricing unavailable"}</span>
+                  <button class="model-option" classList={{ selected: selectedModel()?.id === model.id }} type="button" aria-pressed={selectedModel()?.id === model.id} onClick={() => { setSelectedModelID(model.id); setCurlCopied(false); setCurlCopyError(false); }}>
+                    <span class="model-option-main"><span class="model-option-name">{model.display_name}</span><code>{model.id}</code></span>
+                    <span class="model-option-pricing">{model.pricing ? <>
+                      <span class="model-option-rate"><small>Input / 1M</small><strong>${model.pricing.input_usd_per_million.toFixed(2)}</strong></span>
+                      <span class="model-option-rate"><small>Output / 1M</small><strong>${model.pricing.output_usd_per_million.toFixed(2)}</strong></span>
+                    </> : <span class="model-option-price-note">Pricing unavailable</span>}</span>
                   </button>
                 }</For></div>
                 <Show when={selectedModel()}>{(model) => <div class="model-details">
@@ -160,9 +186,13 @@ function App() {
                     <div><span>Input</span><strong>{model().pricing ? `$${model().pricing!.input_usd_per_million.toFixed(2)}` : "—"}</strong><small>per 1M tokens</small></div>
                     <div><span>Output</span><strong>{model().pricing ? `$${model().pricing!.output_usd_per_million.toFixed(2)}` : "—"}</strong><small>per 1M tokens</small></div>
                   </div>
-                  <p class="form-note">{model().pricing ? model().pricing!.example ? "Example rates for development. These are not published prices. Usage costs are estimates based on measured tokens." : "USD estimates based on measured token usage." : "A price has not been configured for this model."}</p>
+                  <p class="form-note">{model().pricing ? "Usage costs are estimates based on measured tokens." : "A price has not been configured for this model."}</p>
                   <h4>Request body</h4>
                   <pre class="request-example"><code>{exampleRequest()}</code></pre>
+                  <div class="example-heading"><h4>curl example</h4><button class="text-button" type="button" onClick={copyCurl}>{curlCopied() ? "Copied" : "Copy"}</button></div>
+                  <pre class="request-example"><code>{curlExample()}</code></pre>
+                  <p class="form-note">Replace <code>YOUR_API_KEY</code> with your API key before running the command.</p>
+                  <Show when={curlCopyError()}><p class="status-error" role="alert">Copy failed. Select the command and copy it manually.</p></Show>
                 </div>}</Show>
               </Show>
             </Show>
