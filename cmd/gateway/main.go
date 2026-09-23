@@ -49,6 +49,7 @@ func run(logger *slog.Logger) error {
 
 	var accounts gateway.AccountStore
 	var portal gateway.PortalStore
+	var priceStore *accountdb.Store
 	if cfg.databaseURL != "" {
 		store, err := openAccountStore(ctx, cfg.databaseURL)
 		if err != nil {
@@ -57,6 +58,7 @@ func run(logger *slog.Logger) error {
 		defer store.Close()
 		accounts = store
 		portal = store
+		priceStore = store
 		go maintainAccounts(ctx, store, logger)
 	} else {
 		logger.Warn("unauthenticated development mode enabled")
@@ -75,6 +77,16 @@ func run(logger *slog.Logger) error {
 	})
 	if err != nil {
 		return fmt.Errorf("gateway initialization failed: %w", err)
+	}
+	if priceStore != nil {
+		for _, model := range server.PricedModels() {
+			priceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			_, err := priceStore.SetPrice(priceCtx, model.Name, model.Pricing.InputRateMicroPerMillion, model.Pricing.OutputRateMicroPerMillion)
+			cancel()
+			if err != nil {
+				return fmt.Errorf("configure price for %q: %w", model.Name, err)
+			}
+		}
 	}
 	if err := server.Run(ctx); err != nil {
 		return fmt.Errorf("gateway stopped with error: %w", err)

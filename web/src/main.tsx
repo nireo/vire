@@ -4,6 +4,11 @@ import "./style.css";
 
 type Signup = { account_id: string; key_id: string; api_key: string };
 type Account = { account_id: string; name: string; email: string };
+type Model = {
+  id: string;
+  display_name: string;
+  pricing: { input_usd_per_million: number; output_usd_per_million: number; example: boolean } | null;
+};
 type Usage = {
   day: string; model: string; requests: number; complete: number; incomplete: number; failed: number;
   prompt_tokens: number; completion_tokens: number; estimated_cost_micro: number; priced: number;
@@ -27,7 +32,13 @@ async function postJSON<T>(path: string, data: object): Promise<T> {
 
 function App() {
   const [path, setPath] = createSignal(location.pathname);
-  const [models] = createResource(async () => (await getJSON<{ models: string[] }>("/api/models")).models);
+  const [models] = createResource(async () => (await getJSON<{ models: Model[] }>("/api/models")).models);
+  const [selectedModelID, setSelectedModelID] = createSignal("");
+  const selectedModel = createMemo(() => models()?.find((model) => model.id === selectedModelID()) ?? models()?.[0]);
+  const exampleRequest = createMemo(() => JSON.stringify({
+    model: selectedModel()?.id ?? "",
+    messages: [{ role: "user", content: "Hello" }],
+  }, null, 2));
   const [account, { refetch: refreshAccount }] = createResource(async () => {
     const response = await fetch("/api/account");
     if (response.status === 401) return null;
@@ -135,7 +146,24 @@ function App() {
           <Show when={!models.loading} fallback={<p class="muted">Loading models…</p>}>
             <Show when={!models.error} fallback={<p class="status-error" role="alert">Model list is unavailable. Refresh to try again.</p>}>
               <Show when={(models()?.length ?? 0) > 0} fallback={<p class="muted">No models are listed yet.</p>}>
-                <ul class="model-list"><For each={models()}>{(model) => <li>{model}</li>}</For></ul>
+                <div class="model-picker" role="group" aria-label="Select a model"><For each={models()}>{(model) =>
+                  <button class="model-option" classList={{ selected: selectedModel()?.id === model.id }} type="button" aria-pressed={selectedModel()?.id === model.id} onClick={() => setSelectedModelID(model.id)}>
+                    <span class="model-option-name">{model.display_name}</span>
+                    <code>{model.id}</code>
+                    <span class="model-option-price">{model.pricing ? `${model.pricing.example ? "Example · " : ""}Input $${model.pricing.input_usd_per_million.toFixed(2)} / 1M tokens` : "Pricing unavailable"}</span>
+                  </button>
+                }</For></div>
+                <Show when={selectedModel()}>{(model) => <div class="model-details">
+                  <h3>{model().display_name}</h3>
+                  <p class="muted">Use <code>{model().id}</code> as the model ID in API requests.</p>
+                  <div class="model-rates">
+                    <div><span>Input</span><strong>{model().pricing ? `$${model().pricing!.input_usd_per_million.toFixed(2)}` : "—"}</strong><small>per 1M tokens</small></div>
+                    <div><span>Output</span><strong>{model().pricing ? `$${model().pricing!.output_usd_per_million.toFixed(2)}` : "—"}</strong><small>per 1M tokens</small></div>
+                  </div>
+                  <p class="form-note">{model().pricing ? model().pricing!.example ? "Example rates for development. These are not published prices. Usage costs are estimates based on measured tokens." : "USD estimates based on measured token usage." : "A price has not been configured for this model."}</p>
+                  <h4>Request body</h4>
+                  <pre class="request-example"><code>{exampleRequest()}</code></pre>
+                </div>}</Show>
               </Show>
             </Show>
           </Show>

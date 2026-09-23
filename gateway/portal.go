@@ -273,13 +273,45 @@ func (s *Server) logoutHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) portalModelsHandler(w http.ResponseWriter, _ *http.Request) {
-	names := make([]string, 0, len(s.proxies))
-	for name := range s.proxies {
+	type publicPricing struct {
+		InputUSDPerMillion  float64 `json:"input_usd_per_million"`
+		OutputUSDPerMillion float64 `json:"output_usd_per_million"`
+		Example             bool    `json:"example"`
+	}
+	type publicModel struct {
+		ID          string         `json:"id"`
+		DisplayName string         `json:"display_name"`
+		Pricing     *publicPricing `json:"pricing"`
+	}
+	byName := make(map[string]publicModel, len(s.proxies))
+	for _, model := range s.models {
+		if _, exists := byName[model.Name]; exists {
+			continue
+		}
+		item := publicModel{ID: model.Name, DisplayName: model.DisplayName}
+		if item.DisplayName == "" {
+			item.DisplayName = model.Name
+		}
+		if model.Pricing != nil {
+			item.Pricing = &publicPricing{
+				InputUSDPerMillion:  float64(model.Pricing.InputRateMicroPerMillion) / 1_000_000,
+				OutputUSDPerMillion: float64(model.Pricing.OutputRateMicroPerMillion) / 1_000_000,
+				Example:             model.Pricing.Example,
+			}
+		}
+		byName[model.Name] = item
+	}
+	names := make([]string, 0, len(byName))
+	for name := range byName {
 		names = append(names, name)
 	}
 	slices.Sort(names)
+	models := make([]publicModel, 0, len(names))
+	for _, name := range names {
+		models = append(models, byName[name])
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
-		Models []string `json:"models"`
-	}{Models: names})
+		Models []publicModel `json:"models"`
+	}{Models: models})
 }

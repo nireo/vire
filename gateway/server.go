@@ -17,8 +17,17 @@ import (
 const shutdownTimeout = 5 * time.Minute
 
 type Model struct {
-	Name string `json:"name"`
-	URL  string `json:"url"`
+	Name        string        `json:"name"`
+	URL         string        `json:"url"`
+	DisplayName string        `json:"display_name,omitempty"`
+	Pricing     *ModelPricing `json:"pricing,omitempty"`
+}
+
+// Rates are micro-USD per million tokens, matching the usage ledger.
+type ModelPricing struct {
+	InputRateMicroPerMillion  int64 `json:"input_rate_micro_per_million"`
+	OutputRateMicroPerMillion int64 `json:"output_rate_micro_per_million"`
+	Example                   bool  `json:"example,omitempty"`
 }
 
 type Server struct {
@@ -149,11 +158,23 @@ func loadModels(path string) ([]Model, error) {
 		return nil, errors.New("registry must be a JSON array")
 	}
 
-	destinations := make(map[Model]bool, len(models))
+	type destination struct{ name, url string }
+	destinations := make(map[destination]bool, len(models))
+	metadata := make(map[string]Model, len(models))
 	for i, model := range models {
 		if strings.TrimSpace(model.Name) == "" {
 			return nil, fmt.Errorf("model %d: name is required", i)
 		}
+		if model.DisplayName != "" && strings.TrimSpace(model.DisplayName) == "" {
+			return nil, fmt.Errorf("model %d: display_name must not be blank", i)
+		}
+		if model.Pricing != nil && (model.Pricing.InputRateMicroPerMillion < 0 || model.Pricing.OutputRateMicroPerMillion < 0) {
+			return nil, fmt.Errorf("model %d: pricing rates must be nonnegative", i)
+		}
+		if previous, ok := metadata[model.Name]; ok && (previous.DisplayName != model.DisplayName || !samePricing(previous.Pricing, model.Pricing)) {
+			return nil, fmt.Errorf("model %d: replicas of %q must share display_name and pricing", i, model.Name)
+		}
+		metadata[model.Name] = model
 		target, err := url.Parse(model.URL)
 		if err != nil || (target.Scheme != "http" && target.Scheme != "https") || target.Hostname() == "" {
 			return nil, fmt.Errorf("model %d: url must be an absolute HTTP(S) URL", i)
@@ -162,7 +183,7 @@ func loadModels(path string) ([]Model, error) {
 			return nil, fmt.Errorf("model %d: url must contain only an origin, without credentials, query, or fragment", i)
 		}
 		// Treat an origin with a trailing slash as the same destination.
-		key := Model{Name: model.Name, URL: strings.TrimSuffix(target.String(), "/")}
+		key := destination{model.Name, strings.TrimSuffix(target.String(), "/")}
 		if destinations[key] {
 			return nil, fmt.Errorf("model %d: duplicate destination for %q", i, model.Name)
 		}
@@ -170,6 +191,13 @@ func loadModels(path string) ([]Model, error) {
 	}
 
 	return models, nil
+}
+
+func samePricing(a, b *ModelPricing) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -246,6 +274,19 @@ func (s *Server) Run(ctx context.Context) error {
 
 func (s *Server) Handler() http.Handler {
 	return s.httpServer.Handler
+}
+
+// PricedModels returns one configured rate per model, regardless of replica count.
+func (s *Server) PricedModels() []Model {
+	seen := make(map[string]bool, len(s.proxies))
+	var priced []Model
+	for _, model := range s.models {
+		if model.Pricing != nil && !seen[model.Name] {
+			priced = append(priced, model)
+			seen[model.Name] = true
+		}
+	}
+	return priced
 }
 
 func healthHandler(w http.ResponseWriter, _ *http.Request) {

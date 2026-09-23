@@ -124,7 +124,7 @@ class Stack:
         if len({backend_port, gateway_port, web_port, postgres_port}) != 4:
             raise RuntimeError("backend, gateway, web, and Postgres ports must differ")
         model = os.environ.get("VIRE_MODEL", DEFAULT_MODEL)
-        name = os.environ.get("VIRE_MODEL_NAME", "example")
+        name = os.environ.get("VIRE_MODEL_NAME", "qwen2.5-0.5b-instruct" if model == DEFAULT_MODEL else model)
         if not model or not name:
             raise RuntimeError("VIRE_MODEL and VIRE_MODEL_NAME must be nonempty")
         vllm = os.environ.get("VIRE_VLLM_BIN") or shutil.which("vllm") or str(
@@ -168,7 +168,13 @@ class Stack:
         database_env["VIRE_DATABASE_URL"] = (
             f"postgres://vire_local@127.0.0.1:{postgres_port}/vire?sslmode=disable")
         registry = STATE / "models.json"
-        registry.write_text(json.dumps([{"name": name, "url": f"http://127.0.0.1:{backend_port}"}]))
+        entry = {"name": name, "url": f"http://127.0.0.1:{backend_port}"}
+        if model == DEFAULT_MODEL:
+            entry["display_name"] = "Qwen 2.5 0.5B Instruct"
+            entry["pricing"] = {"input_rate_micro_per_million": 100000,
+                                "output_rate_micro_per_million": 200000,
+                                "example": True}
+        registry.write_text(json.dumps([entry]))
 
         print(f"Starting real vLLM ({model}); first use may download model weights...", flush=True)
         self.start_child("vllm", [vllm, "serve", model, "--host", "127.0.0.1",
@@ -183,7 +189,7 @@ class Stack:
                                      "-portal-origin", f"http://127.0.0.1:{web_port}"], env=database_env)
         base = f"http://127.0.0.1:{gateway_port}"
         self.wait_ready("gateway", base + "/api/models", 30,
-                        lambda url: get_json(url).get("models") == [name])
+                        lambda url: [item.get("id") for item in get_json(url).get("models", [])] == [name])
         web_env = os.environ.copy()
         web_env.update(VIRE_GATEWAY_PORT=str(gateway_port), VIRE_WEB_PORT=str(web_port))
         self.start_child("web", [pnpm, "dev"], env=web_env, cwd=ROOT / "web")

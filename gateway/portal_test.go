@@ -51,14 +51,30 @@ func portalServer(t *testing.T, signup PortalStore, webDir string) *Server {
 	return server
 }
 
-func TestPortalModelsExposeNamesOnly(t *testing.T) {
+func TestPortalModelsExposeMetadataWithoutOrigins(t *testing.T) {
 	res := httptest.NewRecorder()
 	portalServer(t, nil, "").Handler().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/api/models", nil))
 	if res.Code != http.StatusOK {
 		t.Fatalf("status = %d", res.Code)
 	}
-	if got := res.Body.String(); got != `{"models":["alpha","zeta"]}`+"\n" {
+	if got := res.Body.String(); got != `{"models":[{"id":"alpha","display_name":"alpha","pricing":null},{"id":"zeta","display_name":"zeta","pricing":null}]}`+"\n" {
 		t.Fatalf("models = %s", got)
+	}
+}
+
+func TestPortalModelsShowPricesAndDeduplicateReplicas(t *testing.T) {
+	registry := `[{"name":"qwen","url":"http://localhost:8000","display_name":"Qwen 2.5 0.5B Instruct","pricing":{"input_rate_micro_per_million":100000,"output_rate_micro_per_million":200000,"example":true}},{"name":"qwen","url":"http://localhost:8001","display_name":"Qwen 2.5 0.5B Instruct","pricing":{"input_rate_micro_per_million":100000,"output_rate_micro_per_million":200000,"example":true}}]`
+	server, err := NewServer(":0", writeRegistry(t, registry))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/api/models", nil))
+	if got := res.Body.String(); got != `{"models":[{"id":"qwen","display_name":"Qwen 2.5 0.5B Instruct","pricing":{"input_usd_per_million":0.1,"output_usd_per_million":0.2,"example":true}}]}`+"\n" {
+		t.Fatalf("models = %s", got)
+	}
+	if got := len(server.PricedModels()); got != 1 {
+		t.Fatalf("priced replicas = %d", got)
 	}
 }
 
