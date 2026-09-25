@@ -1,8 +1,17 @@
+import { streamingMarkdownExtension } from "@tanstack/markdown/extensions/streaming";
+import { renderHtml } from "@tanstack/markdown/html";
 import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
 
 type Model = { id: string; display_name: string };
 type Turn = { role: "user" | "assistant"; content: string };
 type Message = Turn & { id: number; status?: "streaming" | "stopped" | "error" };
+
+const markdownOptions = {
+  allowHtml: false,
+  frontmatter: false,
+  headingIds: false,
+  extensions: [streamingMarkdownExtension()],
+};
 
 export function ChatView(props: { models: Model[]; accountID: string }) {
   const [modelID, setModelID] = createSignal("");
@@ -174,9 +183,10 @@ export function ChatView(props: { models: Model[]; accountID: string }) {
     </div>
     <div class="chat-thread" ref={thread} role="log" aria-label="Conversation">
       <Show when={messages().length} fallback={<div class="chat-empty"><h2>What can I help with?</h2><p>Choose a model and send a message to start.</p></div>}>
-        <For each={messages()}>{(message) => <article class={`chat-message ${message.role}`}>
-          <span class="chat-role">{message.role === "user" ? "You" : "Assistant"}</span>
-          <div class="chat-content">{message.content || (message.status === "streaming" ? <span class="chat-thinking">Thinking…</span> : "")}</div>
+        <For each={messages()}>{(message) => <article class={`chat-message ${message.role}`} aria-label={message.role === "user" ? "Your message" : "Assistant response"}>
+          {message.role === "assistant" && message.content
+            ? <div class="chat-content chat-markdown" innerHTML={renderHtml(message.content, markdownOptions)} />
+            : <div class="chat-content">{message.content || (message.status === "streaming" ? <span class="chat-thinking">Thinking…</span> : "")}</div>}
           <Show when={message.status === "stopped"}><span class="chat-message-note">Stopped</span></Show>
           <Show when={message.status === "error"}><span class="chat-message-note">Response incomplete</span></Show>
         </article>}</For>
